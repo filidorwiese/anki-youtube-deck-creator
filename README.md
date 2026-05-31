@@ -3,6 +3,9 @@
 Turn a YouTube video into an [Anki](https://apps.ankiweb.net/) deck for learning
 a language. Each card is one sentence: the source-language sentence plus its
 audio clip on the front, and a translation into your language on the back.
+Japanese sources also get furigana readings over the kanji, and with
+`--color-words` the matching words in the source and translation are shown
+in the same color.
 
 It's a single Python script that chains together a few command-line tools:
 download the video, transcribe the speech, split it into sentences, translate
@@ -62,6 +65,7 @@ Handy options:
 | `--yes` | off | run unattended: reuse existing output and skip the title prompt |
 | `--title` | video title | name the deck yourself (skips the title prompt) |
 | `--clip-pad` | `0.15` | seconds of audio padding added to each side of a clip |
+| `--color-words` | off | color-code matching words across the source and translation (extra Claude pass) |
 | `--model` | `small` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
 | `--translate-model` | `claude-sonnet-4-6` | which Claude model translates |
 | `--workdir` | `./work` | where intermediate files are saved |
@@ -90,7 +94,9 @@ The pipeline runs in five steps:
 2. **Transcribe** the audio with word-level timing (Whisper).
 3. **Split** the transcript into one card per sentence (on sentence punctuation,
    falling back to Whisper's segment boundaries when none is present).
-4. **Translate** each sentence into your language (Claude).
+4. **Translate** each sentence into your language (Claude). For Japanese it also
+   adds furigana readings, and with `--color-words` it tags which source
+   words match which translation words so they can be colored the same.
 5. **Build the deck** — cut a tight audio clip per sentence (ffmpeg, padded by
    `--clip-pad`) and package the sentences, translations, and clips into a single
    `.apkg` (genanki).

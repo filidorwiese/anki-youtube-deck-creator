@@ -840,7 +840,7 @@ def main() -> None:
     ap.add_argument("--workdir", default="work", help="base working dir (default: ./work)")
     ap.add_argument("--clip-pad", type=float, default=0.15,
                     help="seconds of audio padding each side of a clip (default: 0.15)")
-    ap.add_argument("--align", action="store_true",
+    ap.add_argument("--color-words", action="store_true",
                     help="color-code matching words across source/translation "
                          "(extra LLM pass)")
     ap.add_argument("--title", default=None,
@@ -883,7 +883,8 @@ def main() -> None:
            f"{args.translate_backend})")
     tsv_path, ran_tr = stage_translate(srt_path, wd, vid, args.translate_backend,
                                        args.translate_model, args.source_lang,
-                                       args.user_lang, args.align, args.yes)
+                                       args.user_lang, args.color_words,
+                                       args.yes)
 
     header(5, STAGES_TOTAL, "BUILD DECK (ffmpeg clips + translations -> .apkg)")
     upstream_ran = ran_dl or ran_tx or ran_sp or ran_tr
