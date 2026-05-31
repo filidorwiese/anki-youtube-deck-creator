@@ -320,24 +320,30 @@ SENT_END = "。！？!?"
 
 
 def iter_words(whisper_json: dict):
-    """Yield (text, start, end) for every word across all segments, in order."""
+    """Yield (text, start, end, seg_end) for every word across all segments.
+
+    seg_end is True on the last token of each Whisper segment so callers can
+    treat a segment boundary as a sentence break when no punctuation is present.
+    """
     for seg in whisper_json.get("segments", []):
         words = seg.get("words")
         if words:
-            for w in words:
+            for i, w in enumerate(words):
                 txt = w.get("word", "")
                 if txt is None:
                     continue
-                yield txt, w.get("start"), w.get("end")
+                yield txt, w.get("start"), w.get("end"), i == len(words) - 1
         else:
             # segment without word timestamps: treat whole segment as one unit
-            yield seg.get("text", ""), seg.get("start"), seg.get("end")
+            yield seg.get("text", ""), seg.get("start"), seg.get("end"), True
 
 
 def split_sentences(whisper_json: dict) -> list[dict]:
-    """Re-split word stream into one cue per Japanese sentence.
+    """Re-split word stream into one cue per sentence.
 
-    Break on sentence-ending punctuation; start = first word, end = closing word.
+    Break on sentence-ending punctuation; failing that, break at Whisper segment
+    boundaries (its Japanese word-level output rarely emits 。！？, so without
+    this everything collapses into one cue). start = first word, end = closing word.
     """
     cues: list[dict] = []
     buf: list[str] = []
@@ -352,7 +358,7 @@ def split_sentences(whisper_json: dict) -> list[dict]:
         buf = []
         start = None
 
-    for txt, s, e in iter_words(whisper_json):
+    for txt, s, e, seg_end in iter_words(whisper_json):
         if txt is None:
             txt = ""
         if start is None and txt.strip():
@@ -360,8 +366,8 @@ def split_sentences(whisper_json: dict) -> list[dict]:
         buf.append(txt)
         if e is not None:
             last_end = e
-        # close sentence when this token carries terminal punctuation
-        if any(p in txt for p in SENT_END):
+        # close on terminal punctuation, else at the segment boundary
+        if seg_end or any(p in txt for p in SENT_END):
             flush(e if e is not None else last_end)
     # trailing remainder with no closing punctuation
     flush(last_end)
