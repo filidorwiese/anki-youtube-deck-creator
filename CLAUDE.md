@@ -5,25 +5,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Single-file CLI (`yt2anki.py`) that turns a YouTube video into an Anki deck for
-Japanese learning. Pure stdlib Python (no third-party imports); orchestrates
-external CLI tools instead.
+Japanese learning. Mostly stdlib; one pip dep (`genanki`, lazily imported in
+`write_apkg`) and several external CLI tools it orchestrates.
 
 ## Run
 
+Debian is PEP-668 (externally-managed), so genanki lives in a project venv:
+
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...        # required for translate stage (.env holds it locally)
-./yt2anki.py "<youtube-url>"               # interactive, gates between stages
-./yt2anki.py "<url>" --yes                 # unattended, no gates
-./yt2anki.py "<url>" --model medium        # bigger Whisper model
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python yt2anki.py "<youtube-url>"          # interactive, gates between stages
+.venv/bin/python yt2anki.py "<url>" --yes            # unattended, no gates
+.venv/bin/python yt2anki.py "<url>" --model medium   # bigger Whisper model
 ```
+
+`ANTHROPIC_API_KEY` is required for the translate stage; `load_dotenv()` reads it
+from `.env` (script dir then cwd) at the top of `main()`, but a real env var wins.
 
 Key flags: `--yes` (skip all gates), `--model` (Whisper size, default `small`),
 `--translate-model` (default `claude-sonnet-4-6`), `--translate-backend`
 (default `anthropic`), `--workdir` (default `./work`).
 
-External tools required (checked at startup, install hints printed if missing):
-`yt-dlp`, `whisper`, `substudy`, `ffmpeg`. `deno` is a soft dep yt-dlp needs for
-YouTube JS challenges.
+External tools required (checked at startup with a ✓/✗ checklist, install hints
+printed if missing): `yt-dlp`, `whisper`, `substudy`, `ffmpeg`.
 
 ## Architecture
 
@@ -35,15 +39,17 @@ YouTube JS challenges.
    per Japanese sentence -> strict SRT `<vid>.srt`. The only logic-heavy,
    side-effect-free part (`split_sentences`/`dedupe`/`to_srt`/`parse_srt`).
 4. `stage_translate` — JA->EN via backend registry -> TSV `<vid>.tsv`.
-5. `stage_build_deck` — substudy cuts per-cue audio clips + csv, merged with
-   translations into `<vid>.anki.tsv` (front=JA, back=EN + `[sound:clip]`).
+5. `stage_build_deck` — substudy cuts per-cue audio clips + csv; merged with
+   translations and packaged via `write_apkg` (genanki) into a self-contained
+   `<vid>.apkg` (front=JA, back=EN + `[sound:clip]`, audio bundled).
 
 Cross-cutting conventions to preserve when editing:
 
 - **Per-video working dir** `work/<video_id>/`; every artifact is named
   `<vid>.<ext>` so reruns are isolated and individually reusable.
-- **Idempotency**: each stage calls `reuse(path)` first; if the output exists it
-  offers to skip. Keep new stages following this so partial reruns work.
+- **Idempotency**: each stage calls `reuse(path)` first; if the output file
+  exists (non-empty) the step is auto-skipped (delete the file to force a redo).
+  Keep new stages following this so partial reruns work.
 - **Gate model**: `gate()` pauses for Enter after each stage unless `--yes`.
 - **Fail loud**: use `die(msg, hint)` for unrecoverable errors (exits 1 with an
   install/fix hint), `warn()` for recoverable misalignment.
@@ -56,5 +62,7 @@ Cross-cutting conventions to preserve when editing:
 
 - No test suite exists despite the `[unit-tested]` comment on stage 3; the
   split/SRT functions are the natural place to add tests if asked.
-- `.env` and `__pycache__` are gitignored. Generated `work/` output is large
-  (audio/video) and should not be committed.
+- `.env`, `__pycache__`, `.venv/`, `.idea/`, and `work/` are gitignored.
+  Generated `work/` output is large (audio/video) and should not be committed.
+- `.apkg` uses genanki's legacy schema_v11; stable `APKG_MODEL_ID`/`APKG_DECK_ID`
+  so re-imports update rather than duplicate the model/deck.

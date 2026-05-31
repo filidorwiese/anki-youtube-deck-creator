@@ -10,9 +10,9 @@ them, and cut the audio into per-sentence clips.
 
 ## What you need
 
-The script itself uses only the Python standard library, but it calls these
-external tools (it checks for them on startup and tells you how to install any
-that are missing):
+The script needs one Python package ([genanki](https://github.com/kerrickstaley/genanki),
+to build the `.apkg`) and calls these external command-line tools (it checks for
+them on startup and tells you how to install any that are missing):
 
 | Tool | What it does | Install |
 | --- | --- | --- |
@@ -20,26 +20,34 @@ that are missing):
 | [whisper](https://github.com/openai/whisper) | transcribes Japanese speech | `pip install -U openai-whisper` |
 | [substudy](https://github.com/emk/subtitles-rs) | cuts per-sentence audio clips | `cargo install substudy` |
 | [ffmpeg](https://ffmpeg.org/) | audio/video processing | `apt install ffmpeg` / `brew install ffmpeg` |
-| [deno](https://deno.com/) | needed by yt-dlp for some videos | `curl -fsSL https://deno.land/install.sh \| sh` |
 
 You also need an [Anthropic API key](https://console.anthropic.com/) for the
 translation step.
 
 ## Setup
 
-Put your API key in a `.env` file next to the script:
+1. Install the Python dependency in a virtual environment:
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
+   ```
 
-(`.env` is gitignored. You can also just export the variable in your shell — an
-exported value takes precedence over `.env`.)
+2. Put your API key in a `.env` file next to the script:
+
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+   (`.env` is gitignored. You can also just export the variable in your shell —
+   an exported value takes precedence over `.env`.)
 
 ## Usage
 
+Run with the venv's Python:
+
 ```bash
-./yt2anki.py "https://www.youtube.com/watch?v=..."
+.venv/bin/python yt2anki.py "https://www.youtube.com/watch?v=..."
 ```
 
 By default it pauses after each step so you can check the output before
@@ -62,21 +70,12 @@ start again.
 
 When it finishes you'll have, inside `work/<video-id>/`:
 
-- `<video-id>.anki.tsv` — the file you import into Anki
-- `<video-id>_substudy/` — a folder of `.mp3` audio clips, one per card
+- `<video-id>.apkg` — a ready-to-import Anki deck with the audio bundled in
 
 ## Importing into Anki
 
-The script prints these steps at the end, but for reference:
-
-1. Copy the audio clips into your Anki media folder:
-   ```bash
-   cp work/<video-id>/<video-id>_substudy/*.mp3 ~/.local/share/Anki2/<profile>/collection.media/
-   ```
-2. In Anki: **File > Import** and choose `work/<video-id>/<video-id>.anki.tsv`.
-3. Set **Type: Basic**, **Field separator: Tab**, and turn **Allow HTML in
-   fields: ON**.
-4. Map **column 1 → Front** (Japanese) and **column 2 → Back** (English + audio).
+Double-click the `.apkg`, or in Anki choose **File > Import** and select it. The
+note type, cards, and audio are all included — no manual media copying needed.
 
 ## How it works
 
@@ -86,5 +85,5 @@ The pipeline runs in five steps:
 2. **Transcribe** the Japanese audio with word-level timing (Whisper).
 3. **Split** the transcript into one card per sentence.
 4. **Translate** each sentence to English (Claude).
-5. **Build the deck** — cut an audio clip per sentence (substudy) and combine
-   everything into the import file.
+5. **Build the deck** — cut an audio clip per sentence (substudy) and package
+   the sentences, translations, and clips into a single `.apkg` (genanki).
