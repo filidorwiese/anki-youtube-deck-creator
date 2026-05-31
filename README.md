@@ -1,8 +1,8 @@
 # yt2anki
 
 Turn a YouTube video into an [Anki](https://apps.ankiweb.net/) deck for learning
-Japanese. Each card is one sentence: the Japanese on the front, an English
-translation plus the matching audio clip on the back.
+a language. Each card is one sentence: the source-language sentence plus its
+audio clip on the front, and a translation into your language on the back.
 
 It's a single Python script that chains together a few command-line tools:
 download the video, transcribe the speech, split it into sentences, translate
@@ -17,9 +17,8 @@ them on startup and tells you how to install any that are missing):
 | Tool | What it does | Install                                      |
 | --- | --- |----------------------------------------------|
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | downloads the video & audio | `pipx install yt-dlp`                        |
-| [whisper](https://github.com/openai/whisper) | transcribes Japanese speech | `pipx install openai-whisper`                |
-| [substudy](https://github.com/emk/subtitles-rs) | cuts per-sentence audio clips | `cargo install substudy`                     |
-| [ffmpeg](https://ffmpeg.org/) | audio/video processing | `apt install ffmpeg` / `brew install ffmpeg` |
+| [whisper](https://github.com/openai/whisper) | transcribes the speech with word-level timing | `pipx install openai-whisper`                |
+| [ffmpeg](https://ffmpeg.org/) | cuts the per-sentence audio clips | `apt install ffmpeg` / `brew install ffmpeg` |
 
 You also need an [Anthropic API key](https://console.anthropic.com/) for the
 translation step.
@@ -44,29 +43,33 @@ translation step.
 
 ## Usage
 
-Run with the venv's Python:
+Run with the venv's Python. `--source-lang` (the spoken language of the video)
+is required; `--user-lang` defaults to `en`:
 
 ```bash
-.venv/bin/python yt2anki.py "https://www.youtube.com/watch?v=..."
+.venv/bin/python yt2anki.py --source-lang ja "https://www.youtube.com/watch?v=..."
 ```
 
-By default it pauses after each step so you can check the output before
-continuing. Press Enter to go on, Ctrl-C to stop. The deck is named after the
-YouTube video; the title is shown as an editable prompt so you can tweak it.
+It runs straight through the five steps. The deck is named after the YouTube
+video; the title is shown as an editable prompt so you can tweak it.
 
 Handy options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--yes` | off | run all the way through without pausing or prompting |
+| `--source-lang` | _required_ | spoken language of the video (e.g. `ja`, `fr`) |
+| `--user-lang` | `en` | the language to translate into |
+| `--yes` | off | run unattended: reuse existing output and skip the title prompt |
 | `--title` | video title | name the deck yourself (skips the title prompt) |
+| `--clip-pad` | `0.15` | seconds of audio padding added to each side of a clip |
 | `--model` | `small` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
 | `--translate-model` | `claude-sonnet-4-6` | which Claude model translates |
 | `--workdir` | `./work` | where intermediate files are saved |
 
 Everything for a video is saved under `work/<video-id>/`. If a step's output
 already exists, it asks whether to reuse it or recreate it, so it's safe to stop
-and start again (with `--yes` it always reuses).
+and start again. Choosing recreate at one step recreates every later step too;
+`--yes` always reuses without asking.
 
 ## What you get
 
@@ -84,8 +87,10 @@ note type, cards, and audio are all included — no manual media copying needed.
 The pipeline runs in five steps:
 
 1. **Download** the video and extract the audio (yt-dlp).
-2. **Transcribe** the Japanese audio with word-level timing (Whisper).
-3. **Split** the transcript into one card per sentence.
-4. **Translate** each sentence to English (Claude).
-5. **Build the deck** — cut an audio clip per sentence (substudy) and package
-   the sentences, translations, and clips into a single `.apkg` (genanki).
+2. **Transcribe** the audio with word-level timing (Whisper).
+3. **Split** the transcript into one card per sentence (on sentence punctuation,
+   falling back to Whisper's segment boundaries when none is present).
+4. **Translate** each sentence into your language (Claude).
+5. **Build the deck** — cut a tight audio clip per sentence (ffmpeg, padded by
+   `--clip-pad`) and package the sentences, translations, and clips into a single
+   `.apkg` (genanki).
