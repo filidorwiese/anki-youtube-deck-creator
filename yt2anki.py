@@ -176,8 +176,8 @@ def reuse(path: Path, auto_yes: bool) -> bool:
 # ---------------------------------------------------------------------------
 INSTALL_HINTS = {
     "yt-dlp": "pipx install yt-dlp   (or: python3 -m pip install -U yt-dlp)",
-    "whisper": "python3 -m pip install -U openai-whisper",
-    "ffmpeg": "sudo apt install ffmpeg   (Debian/Ubuntu)  |  brew install ffmpeg",
+    "whisper": "pipx instal openai-whisper (or: python3 -m pip install -U openai-whisper)",
+    "ffmpeg": "sudo apt install ffmpeg   (Debian/Ubuntu)",
 }
 
 
@@ -206,6 +206,7 @@ def check_tools(required: list[str], optional: list[str] = ()) -> None:
     if missing:
         die("missing required tools: " + ", ".join(missing),
             "install the tools marked [✗] above, then re-run")
+    print()
 
 
 # ---------------------------------------------------------------------------
