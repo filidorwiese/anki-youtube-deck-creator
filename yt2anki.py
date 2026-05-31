@@ -518,21 +518,43 @@ def _anthropic_translate(sentences: list[str], model: str,
     return _anthropic_batch(sentences, model, instruction, "translated")
 
 
-def anthropic_furigana(sentences: list[str], model: str) -> list[str]:
-    """Annotate Japanese sentences with kana readings in Anki ruby notation.
+def anthropic_translate_furigana(sentences: list[str], model: str,
+                                 source_lang: str, user_lang: str
+                                 ) -> tuple[list[str], list[str]]:
+    """One call per batch that BOTH translates and adds furigana (saves a pass).
 
-    After each kanji run we append its reading in brackets (e.g. `今日[きょう]`);
-    `ruby_to_html` turns that into <ruby> later. Nothing else is changed.
+    Returns (translations, furigana_sentences). Furigana is Anki ruby notation
+    (`今日[きょう]`) that `ruby_to_html` renders later. Used for JA + anthropic;
+    other languages/backends go through `translate_sentences` instead.
     """
     instruction = (
-        "Add furigana to each numbered Japanese sentence: immediately after "
-        "every kanji run, append its kana reading in square brackets, e.g. "
-        "今日[きょう]は早[はや]いです. Add nothing else, insert no spaces, and "
-        "leave kana, punctuation and numbers unchanged. Return ONLY a JSON array "
-        "of the annotated sentences in the same order, with no list numbering "
-        "and no commentary."
+        f"For each numbered {lang_name(source_lang)} sentence, return its "
+        f"translation into natural but faithful {lang_name(user_lang)} for an A1 "
+        "beginner, and a furigana copy of the original: immediately after every "
+        "kanji run append its kana reading in square brackets, e.g. "
+        "今日[きょう]は早[はや]いです, adding nothing else, no spaces, and leaving "
+        "kana, punctuation and numbers unchanged. Return ONLY a JSON array, one "
+        'object per sentence in order, each {"t": "<translation>", '
+        '"f": "<furigana sentence>"}, with no numbering and no commentary.'
     )
-    return _anthropic_batch(sentences, model, instruction, "furigana")
+    strip = lambda x: re.sub(r"^\s*\d+\.\s*", "", str(x))  # noqa: E731
+    tgt, fura = [], []
+    BATCH = 40
+    for i in range(0, len(sentences), BATCH):
+        chunk = sentences[i:i + BATCH]
+        numbered = "\n".join(f"{j+1}. {s}" for j, s in enumerate(chunk))
+        arr = _extract_json(_anthropic_call(instruction + "\n\n" + numbered, model, 8192))
+        if not isinstance(arr, list) or len(arr) != len(chunk):
+            warn(f"batch {i//BATCH}: expected {len(chunk)} items, got "
+                 f"{len(arr) if isinstance(arr, list) else 'none'}; aligning")
+            arr = (list(arr) if isinstance(arr, list) else []) + [{}] * len(chunk)
+            arr = arr[:len(chunk)]
+        for o in arr:
+            o = o if isinstance(o, dict) else {}
+            tgt.append(strip(o.get("t", "")))
+            fura.append(strip(o.get("f", "")))
+        info(f"translated+furigana {min(i+BATCH, len(sentences))}/{len(sentences)}")
+    return tgt, fura
 
 
 # a kanji run directly followed by [reading] -> <ruby> for Anki/HTML display.
@@ -660,17 +682,19 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
     if not cues:
         die("SRT empty/malformed; nothing to translate", f"inspect {srt_path}")
     src = [c["text"] for c in cues]
-    info(f"translating {len(src)} sentences "
-         f"{lang_name(source_lang)}->{lang_name(user_lang)} "
-         f"via backend '{backend}' ({model})")
-    tgt = translate_sentences(src, backend, model, source_lang, user_lang)
 
-    # furigana column (Anki ruby notation), JA source via Anthropic only; empty
-    # otherwise. TSV layout: src \t translation \t furigana \t algn_src \t algn_tgt
+    # JA + anthropic: translate and furigana in one call. Other languages/backends
+    # translate via the registry and get an empty furigana column.
+    # TSV layout: src \t translation \t furigana \t algn_src \t algn_tgt
     if source_lang.lower() == "ja" and backend == "anthropic":
-        info(f"adding furigana to {len(src)} sentences")
-        fura = anthropic_furigana(src, model)
+        info(f"translating + furigana {len(src)} sentences -> "
+             f"{lang_name(user_lang)} ({model})")
+        tgt, fura = anthropic_translate_furigana(src, model, source_lang, user_lang)
     else:
+        info(f"translating {len(src)} sentences "
+             f"{lang_name(source_lang)}->{lang_name(user_lang)} "
+             f"via backend '{backend}' ({model})")
+        tgt = translate_sentences(src, backend, model, source_lang, user_lang)
         fura = [""] * len(src)
 
     # color-alignment columns (LLM tags matching word groups in both sentences);
