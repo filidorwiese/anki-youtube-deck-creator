@@ -1,6 +1,5 @@
 .env
 __pycache__
 .idea/
-work/
-.idea/
+.venv/
 work/
