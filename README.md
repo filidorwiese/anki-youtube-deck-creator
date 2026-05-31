@@ -58,17 +58,17 @@ video; the title is shown as an editable prompt so you can tweak it.
 
 Handy options:
 
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `--source-lang` | _required_ | spoken language of the video (e.g. `ja`, `fr`) |
-| `--user-lang` | `en` | the language to translate into |
-| `--yes` | off | run unattended: reuse existing output and skip the title prompt |
-| `--title` | video title | name the deck yourself (skips the title prompt) |
-| `--clip-pad` | `0.15` | seconds of audio padding added to each side of a clip |
-| `--color-words` | off | color-code matching words across the source and translation (extra Claude pass) |
-| `--model` | `small` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
+| Option | Default             | Meaning |
+| --- |---------------------| --- |
+| `--source-lang` | _required_          | spoken language of the video (e.g. `ja`, `fr`) |
+| `--user-lang` | `en`                | the language to translate into |
+| `--yes` | off                 | run unattended: reuse existing output and skip the title prompt |
+| `--title` | video title         | name the deck yourself (skips the title prompt) |
+| `--clip-pad` | `0.50`              | seconds of audio padding added to each side of a clip |
+| `--color-words` | off                 | color-code matching words across the source and translation (extra Claude pass) |
+| `--model` | `small`             | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
 | `--translate-model` | `claude-sonnet-4-6` | which Claude model translates |
-| `--workdir` | `./work` | where intermediate files are saved |
+| `--workdir` | `./work`            | where intermediate files are saved |
 
 Everything for a video is saved under `work/<video-id>/`. If a step's output
 already exists, it asks whether to reuse it or recreate it, so it's safe to stop
