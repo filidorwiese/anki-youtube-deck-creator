@@ -552,6 +552,11 @@ ALIGN_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd",
 _GROUP_RE = re.compile(r"\[\[(\d+)\]\](.*?)\[\[/\1\]\]", re.S)
 
 
+def _group_nums(text: str) -> set[int]:
+    """Group numbers that are both opened and closed in `text`."""
+    return {int(m.group(1)) for m in _GROUP_RE.finditer(text)}
+
+
 def colorize(text: str) -> str:
     """`[[1]]today[[/1]]` -> `<span style="color:…">today</span>`.
 
@@ -597,11 +602,13 @@ def anthropic_align(srcs: list[str], tgts: list[str], model: str) -> list[tuple[
         "For each numbered SOURCE/TARGET sentence pair, mark the parts that "
         "correspond. Wrap each group of corresponding words in matching tags "
         "[[n]]...[[/n]] in BOTH the source and the target, using the same number "
-        "n for parts that mean the same thing. Number groups 1,2,3,... restarting "
-        "per pair. Leave grammatical words with no counterpart untagged. Do not "
-        "reorder, translate, or change any characters, including existing furigana "
-        "like 今日[きょう]; only insert the [[n]] tags. Return ONLY a JSON array, "
-        'one object per pair in order, each {"src": "<tagged source>", '
+        "n for parts that mean the same thing. Break each sentence into several "
+        "small groups, one per content word or short phrase; NEVER wrap a whole "
+        "sentence as a single group. Number groups 1,2,3,... restarting per pair. "
+        "Leave grammatical words with no counterpart untagged. Do not reorder, "
+        "translate, or change any characters, including existing furigana like "
+        "今日[きょう]; only insert the [[n]] tags. Return ONLY a JSON array, one "
+        'object per pair in order, each {"src": "<tagged source>", '
         '"tgt": "<tagged target>"}, no commentary.'
     )
     out: list[tuple[str, str]] = []
@@ -618,8 +625,13 @@ def anthropic_align(srcs: list[str], tgts: list[str], model: str) -> list[tuple[
             arr = (list(arr) if isinstance(arr, list) else []) + [{}] * len(cs)
             arr = arr[:len(cs)]
         for o in arr:
-            out.append((o.get("src", ""), o.get("tgt", "")) if isinstance(o, dict)
-                       else ("", ""))
+            asrc, atgt = ((o.get("src", ""), o.get("tgt", ""))
+                          if isinstance(o, dict) else ("", ""))
+            # drop useless alignments (e.g. whole sentence as one group): keep
+            # only if at least two groups appear on BOTH sides.
+            if len(_group_nums(asrc) & _group_nums(atgt)) < 2:
+                asrc, atgt = "", ""
+            out.append((asrc, atgt))
         info(f"aligned {min(i+BATCH, len(srcs))}/{len(srcs)}")
     return out
 
@@ -838,8 +850,8 @@ def main() -> None:
     ap.add_argument("--translate-model", default="claude-sonnet-4-6",
                     help="translation model (default: claude-sonnet-4-6)")
     ap.add_argument("--workdir", default="work", help="base working dir (default: ./work)")
-    ap.add_argument("--clip-pad", type=float, default=0.15,
-                    help="seconds of audio padding each side of a clip (default: 0.15)")
+    ap.add_argument("--clip-pad", type=float, default=0.50,
+                    help="seconds of audio padding each side of a clip (default: 0.50)")
     ap.add_argument("--color-words", action="store_true",
                     help="color-code matching words across source/translation "
                          "(extra LLM pass)")
