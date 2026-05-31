@@ -41,15 +41,19 @@ printed if missing): `yt-dlp`, `whisper`, `substudy`, `ffmpeg`.
 4. `stage_translate` — JA->EN via backend registry -> TSV `<vid>.tsv`.
 5. `stage_build_deck` — substudy cuts per-cue audio clips + csv; merged with
    translations and packaged via `write_apkg` (genanki) into a self-contained
-   `<vid>.apkg` (front=JA, back=EN + `[sound:clip]`, audio bundled).
+   `<vid>.apkg` (front=JA + `[sound:clip]` so audio is on the JP side, back=EN,
+   audio bundled). Deck is named `youtube::<title>`; the title comes from
+   `--title`, else `video_title()` (yt-dlp, cached to `<vid>.title`), and unless
+   `--yes`/`--title` the user can edit it via an inline `prompt_edit()` prompt.
 
 Cross-cutting conventions to preserve when editing:
 
 - **Per-video working dir** `work/<video_id>/`; every artifact is named
   `<vid>.<ext>` so reruns are isolated and individually reusable.
-- **Idempotency**: each stage calls `reuse(path)` first; if the output file
-  exists (non-empty) the step is auto-skipped (delete the file to force a redo).
-  Keep new stages following this so partial reruns work.
+- **Idempotency**: each stage calls `reuse(path, auto_yes)` first; if the output
+  exists it asks skip-vs-recreate (auto-reuses under `--yes`). Stages return a
+  `ran` flag; `stage_build_deck` rebuilds the `.apkg` when any upstream stage ran
+  (`upstream_ran`). Keep new stages following this so partial reruns work.
 - **Gate model**: `gate()` pauses for Enter after each stage unless `--yes`.
 - **Fail loud**: use `die(msg, hint)` for unrecoverable errors (exits 1 with an
   install/fix hint), `warn()` for recoverable misalignment.

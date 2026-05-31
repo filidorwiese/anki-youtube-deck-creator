@@ -14,11 +14,11 @@ The script needs one Python package ([genanki](https://github.com/kerrickstaley/
 to build the `.apkg`) and calls these external command-line tools (it checks for
 them on startup and tells you how to install any that are missing):
 
-| Tool | What it does | Install |
-| --- | --- | --- |
-| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | downloads the video & audio | `pipx install yt-dlp` |
-| [whisper](https://github.com/openai/whisper) | transcribes Japanese speech | `pip install -U openai-whisper` |
-| [substudy](https://github.com/emk/subtitles-rs) | cuts per-sentence audio clips | `cargo install substudy` |
+| Tool | What it does | Install                                      |
+| --- | --- |----------------------------------------------|
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | downloads the video & audio | `pipx install yt-dlp`                        |
+| [whisper](https://github.com/openai/whisper) | transcribes Japanese speech | `pipx install openai-whisper`                |
+| [substudy](https://github.com/emk/subtitles-rs) | cuts per-sentence audio clips | `cargo install substudy`                     |
 | [ffmpeg](https://ffmpeg.org/) | audio/video processing | `apt install ffmpeg` / `brew install ffmpeg` |
 
 You also need an [Anthropic API key](https://console.anthropic.com/) for the
@@ -51,20 +51,22 @@ Run with the venv's Python:
 ```
 
 By default it pauses after each step so you can check the output before
-continuing. Press Enter to go on, Ctrl-C to stop.
+continuing. Press Enter to go on, Ctrl-C to stop. The deck is named after the
+YouTube video; the title is shown as an editable prompt so you can tweak it.
 
 Handy options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--yes` | off | run all the way through without pausing |
+| `--yes` | off | run all the way through without pausing or prompting |
+| `--title` | video title | name the deck yourself (skips the title prompt) |
 | `--model` | `small` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
 | `--translate-model` | `claude-sonnet-4-6` | which Claude model translates |
 | `--workdir` | `./work` | where intermediate files are saved |
 
-Everything for a video is saved under `work/<video-id>/`. If you re-run the same
-video, finished steps are reused instead of redone, so it's safe to stop and
-start again.
+Everything for a video is saved under `work/<video-id>/`. If a step's output
+already exists, it asks whether to reuse it or recreate it, so it's safe to stop
+and start again (with `--yes` it always reuses).
 
 ## What you get
 
