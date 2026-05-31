@@ -6,7 +6,6 @@ Each stage logs what it produced and (unless --yes) waits for Enter.
 Intermediate files live in a per-video working dir so runs don't collide.
 """
 import argparse
-import csv
 import json
 import os
 import re
@@ -101,22 +100,11 @@ def die(msg: str, hint: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Process / gate helpers
+# Process helpers
 # ---------------------------------------------------------------------------
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     info("$ " + " ".join(str(c) for c in cmd))
     return subprocess.run([str(c) for c in cmd], check=True, **kw)
-
-
-def gate(auto_yes: bool) -> None:
-    """Manual continue? gate after each stage."""
-    if auto_yes:
-        return
-    try:
-        input(_c("1;35", "  → press Enter to continue (Ctrl-C to abort) "))
-    except (KeyboardInterrupt, EOFError):
-        print()
-        die("aborted by user")
 
 
 def prompt_edit(label: str, default: str) -> str:
@@ -148,17 +136,26 @@ def prompt_edit(label: str, default: str) -> str:
     return ans.strip() or default
 
 
+# once the user picks [r]ecreate at any prompt, every later stage recreates too
+_RECREATE_REST = False
+
+
 def reuse(path: Path, auto_yes: bool) -> bool:
     """If an output already exists, ask whether to skip the step or recreate it.
 
     Returns True to skip (reuse the existing file), False to recreate it. With
-    --yes (unattended) the existing file is reused without asking.
+    --yes (unattended) the existing file is reused without asking. Picking
+    [r]ecreate is sticky: all subsequent stages recreate without re-asking.
     """
+    global _RECREATE_REST
     if not path.exists() or path.stat().st_size == 0:
         return False
     if auto_yes:
         info(f"exists, reusing: {path}")
         return True
+    if _RECREATE_REST:
+        info(f"recreating: {path}")
+        return False
     try:
         ans = input(_c(
             "1;33", f"  ? {path} exists. [s]kip / [r]ecreate? [S/r] "
@@ -167,7 +164,8 @@ def reuse(path: Path, auto_yes: bool) -> bool:
         print()
         return True
     if ans in ("r", "recreate"):
-        info(f"recreating: {path}")
+        _RECREATE_REST = True
+        info(f"recreating (this and all later stages): {path}")
         return False
     info(f"reusing: {path}")
     return True
@@ -179,7 +177,6 @@ def reuse(path: Path, auto_yes: bool) -> bool:
 INSTALL_HINTS = {
     "yt-dlp": "pipx install yt-dlp   (or: python3 -m pip install -U yt-dlp)",
     "whisper": "python3 -m pip install -U openai-whisper",
-    "substudy": "cargo install substudy   (needs Rust: https://rustup.rs)",
     "ffmpeg": "sudo apt install ffmpeg   (Debian/Ubuntu)  |  brew install ffmpeg",
 }
 
@@ -296,14 +293,28 @@ def stage_download(url: str, wd: Path, vid: str, auto_yes: bool) -> tuple[Path, 
 # ===========================================================================
 # STAGE 2 — TRANSCRIBE (Whisper, word-level JSON)
 # ===========================================================================
+LANG_NAMES = {
+    "en": "English", "ja": "Japanese", "zh": "Chinese", "ko": "Korean",
+    "es": "Spanish", "fr": "French", "de": "German", "it": "Italian",
+    "pt": "Portuguese", "ru": "Russian", "nl": "Dutch", "pl": "Polish",
+    "tr": "Turkish", "ar": "Arabic", "hi": "Hindi", "id": "Indonesian",
+    "vi": "Vietnamese", "th": "Thai", "sv": "Swedish", "uk": "Ukrainian",
+}
+
+
+def lang_name(code: str) -> str:
+    """Human-readable language name for a code (falls back to the code itself)."""
+    return LANG_NAMES.get(code.strip().lower(), code)
+
+
 def stage_transcribe(mp3: Path, wd: Path, vid: str, model: str,
-                     auto_yes: bool) -> tuple[Path, bool]:
+                     source_lang: str, auto_yes: bool) -> tuple[Path, bool]:
     out_json = wd / f"{vid}.json"
     if reuse(out_json, auto_yes):
         produced(out_json)
         return out_json, False
     run(["whisper", str(mp3),
-         "--language", "ja", "--task", "transcribe",
+         "--language", source_lang, "--task", "transcribe",
          "--word_timestamps", "True", "--model", model,
          "--output_format", "json", "--output_dir", str(wd)])
     # whisper names output after the input stem: <vid>.json
@@ -444,8 +455,9 @@ def parse_srt(srt_text: str) -> list[dict]:
     return cues
 
 
-def _anthropic_translate(sentences: list[str], model: str) -> list[str]:
-    """Batch-translate JA->EN via the Anthropic Messages API (stdlib HTTP)."""
+def _anthropic_translate(sentences: list[str], model: str,
+                         source_lang: str, user_lang: str) -> list[str]:
+    """Batch-translate source_lang->user_lang via the Anthropic Messages API."""
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         die("ANTHROPIC_API_KEY not set", "export ANTHROPIC_API_KEY=sk-ant-...")
@@ -455,9 +467,10 @@ def _anthropic_translate(sentences: list[str], model: str) -> list[str]:
         chunk = sentences[i:i + BATCH]
         numbered = "\n".join(f"{j+1}. {s}" for j, s in enumerate(chunk))
         prompt = (
-            "Translate each numbered Japanese sentence into natural but faithful "
-            "English for an A1 beginner learner. Keep the same numbering. "
-            "Return ONLY a JSON array of strings, in order, no commentary.\n\n"
+            f"Translate each numbered {lang_name(source_lang)} sentence into "
+            f"natural but faithful {lang_name(user_lang)} for an A1 beginner "
+            "learner. Keep the same numbering. Return ONLY a JSON array of "
+            "strings, in order, no commentary.\n\n"
             + numbered
         )
         body = json.dumps({
@@ -505,16 +518,18 @@ def _extract_json_array(text: str) -> list[str]:
 TRANSLATORS = {"anthropic": _anthropic_translate}
 
 
-def translate_sentences(sentences: list[str], backend: str, model: str) -> list[str]:
+def translate_sentences(sentences: list[str], backend: str, model: str,
+                        source_lang: str, user_lang: str) -> list[str]:
     fn = TRANSLATORS.get(backend)
     if not fn:
         die(f"unknown translate backend: {backend}",
             f"available: {', '.join(TRANSLATORS)}")
-    return fn(sentences, model)
+    return fn(sentences, model, source_lang, user_lang)
 
 
 def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
-                    model: str, auto_yes: bool) -> tuple[Path, bool]:
+                    model: str, source_lang: str, user_lang: str,
+                    auto_yes: bool) -> tuple[Path, bool]:
     tsv_path = wd / f"{vid}.tsv"
     if reuse(tsv_path, auto_yes):
         produced(tsv_path)
@@ -522,67 +537,43 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
     cues = parse_srt(srt_path.read_text(encoding="utf-8"))
     if not cues:
         die("SRT empty/malformed; nothing to translate", f"inspect {srt_path}")
-    ja = [c["text"] for c in cues]
-    info(f"translating {len(ja)} sentences via backend '{backend}' ({model})")
-    en = translate_sentences(ja, backend, model)
+    src = [c["text"] for c in cues]
+    info(f"translating {len(src)} sentences "
+         f"{lang_name(source_lang)}->{lang_name(user_lang)} "
+         f"via backend '{backend}' ({model})")
+    tgt = translate_sentences(src, backend, model, source_lang, user_lang)
     with tsv_path.open("w", encoding="utf-8", newline="") as f:
-        for j, e in zip(ja, en):
+        for s, t in zip(src, tgt):
             # TAB-separated; strip tabs/newlines from fields to keep it clean
-            f.write(j.replace("\t", " ").replace("\n", " ") + "\t" +
-                    e.replace("\t", " ").replace("\n", " ") + "\n")
+            f.write(s.replace("\t", " ").replace("\n", " ") + "\t" +
+                    t.replace("\t", " ").replace("\n", " ") + "\n")
     produced(tsv_path)
     return tsv_path, True
 
 
 # ===========================================================================
-# STAGE 5 — BUILD DECK  (substudy export csv + merge translations -> .apkg)
+# STAGE 5 — BUILD DECK  (ffmpeg per-cue clips + merge translations -> .apkg)
 # ===========================================================================
-def _find_substudy_csv(out_dir: Path) -> Path:
-    # substudy nests output in a <name>_csv/ subdir, so search recursively
-    for name in ("cards.csv", "index.csv", "export.csv"):
-        hits = list(out_dir.rglob(name))
-        if hits:
-            return hits[0]
-    csvs = list(out_dir.rglob("*.csv"))
-    if csvs:
-        return csvs[0]
-    die(f"could not find substudy csv in {out_dir}", "inspect that folder manually")
+def _srt_ts_to_sec(ts: str) -> float:
+    """'00:01:02,500' (or with '.') -> 62.5 seconds."""
+    h, m, rest = ts.replace(",", ".").split(":")
+    return int(h) * 3600 + int(m) * 60 + float(rest)
 
 
-_AUDIO_RE = re.compile(r"([^\s\[\]\"'<>:]+\.(?:mp3|m4a|wav|oga|ogg))", re.I)
+def cut_clip(mp3: Path, start: float, end: float, pad: float, out: Path) -> None:
+    """Extract [start-pad, end+pad] from mp3 into out (re-encoded, tight cut).
 
-
-def _audio_field(row_vals: list[str]) -> str | None:
-    """Find an audio clip filename in a substudy csv row.
-
-    substudy wraps it as `[sound:clip.mp3]`, so match the filename anywhere in
-    the field rather than requiring the value to *end* in an audio extension.
+    Input seeking (-ss before -i) keeps it fast even for clips late in a long
+    file; re-encoding keeps the cut frame-accurate near our small pad.
     """
-    for v in row_vals:
-        if isinstance(v, str):
-            m = _AUDIO_RE.search(v)
-            if m:
-                return Path(m.group(1)).name
-    return None
-
-
-def _ts_like(s: str) -> bool:
-    return bool(re.match(r"^\d+(\.\d+)?$|^\d{2}:\d{2}", s.strip()))
-
-
-def _japanese_field(row_vals: list[str]) -> str:
-    """Pick the field most likely to be the Japanese subtitle text."""
-    cand = [v for v in row_vals
-            if isinstance(v, str)
-            and not v.strip().lower().endswith((".mp3", ".m4a", ".wav", ".jpg", ".png", ".ogg", ".oga"))
-            and not _ts_like(v)]
-    if not cand:
-        return ""
-    # prefer the field containing CJK characters
-    for v in cand:
-        if re.search(r"[぀-ヿ一-鿿]", v):
-            return v.strip()
-    return max(cand, key=len).strip()
+    ss = max(0.0, start - pad)
+    dur = max(0.05, (end + pad) - ss)
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+         "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}", "-i", str(mp3),
+         "-c:a", "libmp3lame", "-q:a", "5", str(out)],
+        check=True,
+    )
 
 
 # --- .apkg writer (genanki) ------------------------------------------------
@@ -635,9 +626,9 @@ def _print_import_instructions(apkg: Path) -> None:
 
 
 def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
-                     vid: str, deck_name: str, upstream_ran: bool,
-                     auto_yes: bool) -> tuple[Path, Path]:
-    export_dir = wd / f"{vid}_substudy"
+                     vid: str, deck_name: str, clip_pad: float,
+                     upstream_ran: bool, auto_yes: bool) -> tuple[Path, Path]:
+    clip_dir = wd / f"{vid}_clips"
     apkg = wd / f"{vid}.apkg"
 
     # reuse an existing apkg only if no upstream stage actually ran this run;
@@ -645,66 +636,44 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
     if not upstream_ran and reuse(apkg, auto_yes):
         produced(apkg)
         _print_import_instructions(apkg)
-        return apkg, export_dir
+        return apkg, clip_dir
     if apkg.exists() and upstream_ran:
         info("upstream stage ran; rebuilding .apkg")
 
-    if export_dir.exists():
-        # substudy refuses to overwrite; clear stale dir
-        shutil.rmtree(export_dir)
-    export_dir.mkdir(parents=True, exist_ok=True)
+    if clip_dir.exists():
+        shutil.rmtree(clip_dir)
+    clip_dir.mkdir(parents=True, exist_ok=True)
 
-    # substudy export csv <media> <foreign-subs>  -> cuts per-cue audio clips + csv
-    # absolute paths: we run with cwd=export_dir, so relative inputs wouldn't resolve
-    run(["substudy", "export", "csv", str(mp3.resolve()), str(srt_path.resolve())],
-        cwd=export_dir)
+    # cues drive both the audio cuts and the card source text
+    cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+    if not cues:
+        die("no cues in SRT", f"inspect {srt_path}")
 
-    sub_csv = _find_substudy_csv(export_dir)
-    clip_dir = sub_csv.parent  # mp3 clips live next to the csv
-    info(f"substudy csv: {sub_csv}")
-
-    # english translations aligned to srt order
+    # user-lang translations aligned to srt order
     en = []
     for line in tsv_path.read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")
         en.append(parts[1] if len(parts) > 1 else "")
-
-    # read substudy rows (gives us the per-cue audio clip filename + JA text)
-    with sub_csv.open(encoding="utf-8", newline="") as f:
-        rows = list(csv.reader(f))
-    if not rows:
-        die("substudy csv is empty", f"inspect {sub_csv}")
-
-    # detect header vs data
-    header_row = rows[0]
-    has_header = any(not _ts_like(c) and "." not in c for c in header_row) and \
-        not _audio_field(header_row)
-    data_rows = rows[1:] if has_header else rows
-    info(f"substudy produced {len(data_rows)} card rows")
-
-    if len(data_rows) != len(en):
-        warn(f"row count mismatch: {len(data_rows)} clips vs {len(en)} translations; "
+    if len(cues) != len(en):
+        warn(f"row count mismatch: {len(cues)} cues vs {len(en)} translations; "
              "aligning by index (extra entries dropped)")
 
-    # Build cards: front=JA + [sound:clip] (audio on the JP side), back=EN.
+    # cut one tight clip per cue with ffmpeg (pad each side by clip_pad)
+    info(f"cutting {len(cues)} clips (pad {clip_pad:.2f}s each side)")
     cards: list[tuple[str, str, list[Path]]] = []
-    for i in range(min(len(data_rows), len(en))):
-        row_vals = data_rows[i]
-        front = _japanese_field(row_vals)
-        back = en[i]
-        clips: list[Path] = []
-        audio = _audio_field(row_vals)
-        if audio:
-            clip = clip_dir / audio
-            if clip.exists():
-                front = f"{front}<br>[sound:{audio}]"
-                clips.append(clip)
-        cards.append((front, back, clips))
+    for i in range(min(len(cues), len(en))):
+        c = cues[i]
+        name = f"{vid}_{i:05d}.mp3"
+        clip = clip_dir / name
+        cut_clip(mp3, _srt_ts_to_sec(c["start"]), _srt_ts_to_sec(c["end"]),
+                 clip_pad, clip)
+        front = f"{c['text']}<br>[sound:{name}]"
+        cards.append((front, en[i], [clip]))
 
     write_apkg(apkg, deck_name, cards)
     produced(apkg)
     _print_import_instructions(apkg)
-    return apkg, export_dir
+    return apkg, clip_dir
 
 
 # ===========================================================================
@@ -714,24 +683,34 @@ STAGES_TOTAL = 5
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="YouTube -> Anki deck (Japanese)")
+    ap = argparse.ArgumentParser(description="YouTube -> Anki deck (language learning)")
     ap.add_argument("url", help="YouTube video URL")
-    ap.add_argument("--yes", action="store_true", help="skip all continue? gates (unattended)")
+    ap.add_argument("--source-lang", default=None,
+                    help="spoken language of the video, e.g. ja (REQUIRED)")
+    ap.add_argument("--user-lang", default="en",
+                    help="your language to translate into (default: en)")
+    ap.add_argument("--yes", action="store_true",
+                    help="unattended: auto-reuse existing outputs, skip title prompt")
     ap.add_argument("--model", default="small", help="Whisper model (default: small)")
     ap.add_argument("--translate-backend", default="anthropic",
                     help="translation backend (default: anthropic)")
     ap.add_argument("--translate-model", default="claude-sonnet-4-6",
                     help="translation model (default: claude-sonnet-4-6)")
     ap.add_argument("--workdir", default="work", help="base working dir (default: ./work)")
+    ap.add_argument("--clip-pad", type=float, default=0.15,
+                    help="seconds of audio padding each side of a clip (default: 0.15)")
     ap.add_argument("--title", default=None,
                     help="deck title (default: the YouTube video title)")
     args = ap.parse_args()
+    if not args.source_lang:
+        ap.error("--source-lang is required: set the spoken language of the "
+                 "video, e.g. --source-lang ja  (--user-lang defaults to en)")
 
     # load .env (script dir first, then cwd); real env vars still take precedence
     load_dotenv(Path(__file__).resolve().parent / ".env")
     load_dotenv(Path(".env"))
 
-    check_tools(["yt-dlp", "whisper", "substudy", "ffmpeg"])
+    check_tools(["yt-dlp", "whisper", "ffmpeg"])
 
     vid = video_id(args.url)
     wd = Path(args.workdir) / vid
@@ -746,26 +725,27 @@ def main() -> None:
 
     header(1, STAGES_TOTAL, "DOWNLOAD (yt-dlp: mp3 audio + source video)")
     mp3, _video, ran_dl = stage_download(args.url, wd, vid, args.yes)
-    gate(args.yes)
 
-    header(2, STAGES_TOTAL, f"TRANSCRIBE (Whisper, model={args.model})")
-    json_path, ran_tx = stage_transcribe(mp3, wd, vid, args.model, args.yes)
-    gate(args.yes)
+    header(2, STAGES_TOTAL,
+           f"TRANSCRIBE (Whisper, model={args.model}, lang={args.source_lang})")
+    json_path, ran_tx = stage_transcribe(mp3, wd, vid, args.model,
+                                         args.source_lang, args.yes)
 
     header(3, STAGES_TOTAL, "SENTENCE SPLIT (strict SRT, deduped)")
     srt_path, ran_sp = stage_sentence_split(json_path, wd, vid, args.yes)
-    gate(args.yes)
 
-    header(4, STAGES_TOTAL, f"TRANSLATE (JA->EN, {args.translate_backend})")
+    header(4, STAGES_TOTAL,
+           f"TRANSLATE ({lang_name(args.source_lang)}->{lang_name(args.user_lang)}, "
+           f"{args.translate_backend})")
     tsv_path, ran_tr = stage_translate(srt_path, wd, vid, args.translate_backend,
-                                       args.translate_model, args.yes)
-    gate(args.yes)
+                                       args.translate_model, args.source_lang,
+                                       args.user_lang, args.yes)
 
-    header(5, STAGES_TOTAL, "BUILD DECK (substudy clips + translations -> .apkg)")
+    header(5, STAGES_TOTAL, "BUILD DECK (ffmpeg clips + translations -> .apkg)")
     upstream_ran = ran_dl or ran_tx or ran_sp or ran_tr
-    apkg, export_dir = stage_build_deck(mp3, srt_path, tsv_path, wd, vid,
-                                        deck_name, upstream_ran, args.yes)
-    gate(args.yes)
+    apkg, _clip_dir = stage_build_deck(mp3, srt_path, tsv_path, wd, vid,
+                                       deck_name, args.clip_pad, upstream_ran,
+                                       args.yes)
 
     print()
     good(f"DONE. Anki deck: {apkg}")
