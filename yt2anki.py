@@ -455,52 +455,94 @@ def parse_srt(srt_text: str) -> list[dict]:
     return cues
 
 
-def _anthropic_translate(sentences: list[str], model: str,
-                         source_lang: str, user_lang: str) -> list[str]:
-    """Batch-translate source_lang->user_lang via the Anthropic Messages API."""
+def _anthropic_call(prompt: str, model: str, max_tokens: int = 4096) -> str:
+    """Single Anthropic Messages call -> concatenated text content."""
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         die("ANTHROPIC_API_KEY not set", "export ANTHROPIC_API_KEY=sk-ant-...")
+    body = json.dumps({
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "content-type": "application/json",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            resp = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        die(f"Anthropic API error {e.code}: {e.read().decode(errors='ignore')[:300]}")
+    return "".join(p.get("text", "") for p in resp.get("content", []))
+
+
+def _anthropic_batch(sentences: list[str], model: str, instruction: str,
+                     label: str) -> list[str]:
+    """Run a per-sentence Anthropic task returning one output string per input.
+
+    `instruction` must ask for a JSON array of strings in input order; we batch
+    to keep the number of API calls low and re-align if a batch comes back short.
+    """
     out: list[str] = []
     BATCH = 50  # few API calls, not one-per-sentence
     for i in range(0, len(sentences), BATCH):
         chunk = sentences[i:i + BATCH]
         numbered = "\n".join(f"{j+1}. {s}" for j, s in enumerate(chunk))
-        prompt = (
-            f"Translate each numbered {lang_name(source_lang)} sentence into "
-            f"natural but faithful {lang_name(user_lang)} for an A1 beginner "
-            "learner. Keep the same numbering. Return ONLY a JSON array of "
-            "strings, in order, no commentary.\n\n"
-            + numbered
-        )
-        body = json.dumps({
-            "model": model,
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}],
-        }).encode()
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=body,
-            headers={
-                "content-type": "application/json",
-                "x-api-key": key,
-                "anthropic-version": "2023-06-01",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                resp = json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            die(f"Anthropic API error {e.code}: {e.read().decode(errors='ignore')[:300]}")
-        text = "".join(p.get("text", "") for p in resp.get("content", []))
-        arr = _extract_json_array(text)
+        arr = _extract_json_array(_anthropic_call(instruction + "\n\n" + numbered, model))
+        # the model sometimes echoes the "N. " list prefix into each item
+        arr = [re.sub(r"^\s*\d+\.\s*", "", x) for x in arr]
         if len(arr) != len(chunk):
-            warn(f"batch {i//BATCH}: expected {len(chunk)} translations, got {len(arr)}; "
+            warn(f"batch {i//BATCH}: expected {len(chunk)} {label}, got {len(arr)}; "
                  "padding/truncating to align")
             arr = (arr + [""] * len(chunk))[:len(chunk)]
         out.extend(arr)
-        info(f"translated {min(i+BATCH, len(sentences))}/{len(sentences)}")
+        info(f"{label} {min(i+BATCH, len(sentences))}/{len(sentences)}")
     return out
+
+
+def _anthropic_translate(sentences: list[str], model: str,
+                         source_lang: str, user_lang: str) -> list[str]:
+    """Batch-translate source_lang->user_lang via the Anthropic Messages API."""
+    instruction = (
+        f"Translate each numbered {lang_name(source_lang)} sentence into "
+        f"natural but faithful {lang_name(user_lang)} for an A1 beginner "
+        "learner. Return ONLY a JSON array of the translations in the same "
+        "order, with no numbering and no commentary."
+    )
+    return _anthropic_batch(sentences, model, instruction, "translated")
+
+
+def anthropic_furigana(sentences: list[str], model: str) -> list[str]:
+    """Annotate Japanese sentences with kana readings in Anki ruby notation.
+
+    After each kanji run we append its reading in brackets (e.g. `今日[きょう]`);
+    `ruby_to_html` turns that into <ruby> later. Nothing else is changed.
+    """
+    instruction = (
+        "Add furigana to each numbered Japanese sentence: immediately after "
+        "every kanji run, append its kana reading in square brackets, e.g. "
+        "今日[きょう]は早[はや]いです. Add nothing else, insert no spaces, and "
+        "leave kana, punctuation and numbers unchanged. Return ONLY a JSON array "
+        "of the annotated sentences in the same order, with no list numbering "
+        "and no commentary."
+    )
+    return _anthropic_batch(sentences, model, instruction, "furigana")
+
+
+# a kanji run directly followed by [reading] -> <ruby> for Anki/HTML display.
+# Matching only kanji as the base avoids grabbing leading kana (お茶[ちゃ] -> 茶).
+_RUBY_RE = re.compile(r"([一-鿿々〆ヶ]+)\[([^\[\]]+)\]")
+
+
+def ruby_to_html(text: str) -> str:
+    """`今日[きょう]は` -> `<ruby>今日<rt>きょう</rt></ruby>は`."""
+    return _RUBY_RE.sub(r"<ruby>\1<rt>\2</rt></ruby>", text)
 
 
 def _extract_json_array(text: str) -> list[str]:
@@ -542,11 +584,21 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
          f"{lang_name(source_lang)}->{lang_name(user_lang)} "
          f"via backend '{backend}' ({model})")
     tgt = translate_sentences(src, backend, model, source_lang, user_lang)
+
+    # furigana column (Anki ruby notation), JA source via Anthropic only; empty
+    # otherwise so the TSV layout stays src \t translation \t furigana.
+    if source_lang.lower() == "ja" and backend == "anthropic":
+        info(f"adding furigana to {len(src)} sentences")
+        fura = anthropic_furigana(src, model)
+    else:
+        fura = [""] * len(src)
+
+    def clean(x: str) -> str:
+        return x.replace("\t", " ").replace("\n", " ")
+
     with tsv_path.open("w", encoding="utf-8", newline="") as f:
-        for s, t in zip(src, tgt):
-            # TAB-separated; strip tabs/newlines from fields to keep it clean
-            f.write(s.replace("\t", " ").replace("\n", " ") + "\t" +
-                    t.replace("\t", " ").replace("\n", " ") + "\n")
+        for s, t, fr in zip(src, tgt, fura):
+            f.write(clean(s) + "\t" + clean(t) + "\t" + clean(fr) + "\n")
     produced(tsv_path)
     return tsv_path, True
 
@@ -649,11 +701,12 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
     if not cues:
         die("no cues in SRT", f"inspect {srt_path}")
 
-    # user-lang translations aligned to srt order
-    en = []
+    # translations (col 2) + optional furigana (col 3) aligned to srt order
+    en, fura = [], []
     for line in tsv_path.read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")
         en.append(parts[1] if len(parts) > 1 else "")
+        fura.append(parts[2] if len(parts) > 2 else "")
     if len(cues) != len(en):
         warn(f"row count mismatch: {len(cues)} cues vs {len(en)} translations; "
              "aligning by index (extra entries dropped)")
@@ -667,7 +720,9 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
         clip = clip_dir / name
         cut_clip(mp3, _srt_ts_to_sec(c["start"]), _srt_ts_to_sec(c["end"]),
                  clip_pad, clip)
-        front = f"{c['text']}<br>[sound:{name}]"
+        # show furigana ruby when available, else the plain cue text
+        sentence = ruby_to_html(fura[i]) if fura[i].strip() else c["text"]
+        front = f"{sentence}<br>[sound:{name}]"
         cards.append((front, en[i], [clip]))
 
     write_apkg(apkg, deck_name, cards)
