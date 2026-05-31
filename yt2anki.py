@@ -29,6 +29,7 @@ os.environ["PATH"] = os.pathsep.join(
     dict.fromkeys(_EXTRA_PATHS + os.environ.get("PATH", "").split(os.pathsep))
 )
 
+
 # ---------------------------------------------------------------------------
 # .env loading (stdlib only; no python-dotenv dependency)
 # ---------------------------------------------------------------------------
@@ -138,7 +139,6 @@ INSTALL_HINTS = {
     "whisper": "python3 -m pip install -U openai-whisper",
     "substudy": "cargo install substudy   (needs Rust: https://rustup.rs)",
     "ffmpeg": "sudo apt install ffmpeg   (Debian/Ubuntu)  |  brew install ffmpeg",
-    "deno": "curl -fsSL https://deno.land/install.sh | sh",
 }
 
 
@@ -146,14 +146,27 @@ def have(tool: str) -> bool:
     return shutil.which(tool) is not None
 
 
-def check_tools(required: list[str]) -> None:
-    missing = [t for t in required if not have(t)]
+def check_tools(required: list[str], optional: list[str] = ()) -> None:
+    """Print a ✓/✗ checklist of tools found on $PATH. Exit if a required one is missing."""
+    print()
+    print(_c("1;36", "  Tool check ($PATH)"))
+    missing = []
+    for t in required:
+        if have(t):
+            print(_c("1;32", f"   [✓] {t}"))
+        else:
+            print(_c("1;31", f"   [✗] {t}  (required)"))
+            print(_c("0;33", f"       {INSTALL_HINTS.get(t, '')}"))
+            missing.append(t)
+    for t in optional:
+        if have(t):
+            print(_c("1;32", f"   [✓] {t}  (optional)"))
+        else:
+            print(_c("1;33", f"   [✗] {t}  (optional)"))
+            print(_c("0;33", f"       {INSTALL_HINTS.get(t, '')}"))
     if missing:
-        err("missing required tools: " + ", ".join(missing))
-        for t in missing:
-            print(_c("0;33", f"    {t}: {INSTALL_HINTS.get(t, '')}"), file=sys.stderr)
-        sys.exit(1)
-    good("all required tools present: " + ", ".join(required))
+        die("missing required tools: " + ", ".join(missing),
+            "install the tools marked [✗] above, then re-run")
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +201,6 @@ def stage_download(url: str, wd: Path, vid: str, auto_yes: bool) -> tuple[Path, 
         None,
     )
 
-    if not have("deno"):
-        warn("deno (JS runtime) not found. Recent yt-dlp needs it for YouTube's "
-             "JS challenges; download may fail with 'player' / nsig errors.")
-        print(_c("0;33", f"    install deno: {INSTALL_HINTS['deno']}"), file=sys.stderr)
-
     # --- audio mp3 ---
     if reuse(mp3):
         info("skipping audio download")
@@ -200,7 +208,7 @@ def stage_download(url: str, wd: Path, vid: str, auto_yes: bool) -> tuple[Path, 
         run(["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0",
              "-o", str(wd / f"{vid}.%(ext)s"), url])
     if not mp3.exists():
-        die("audio mp3 not produced", "check yt-dlp output above; deno may be required")
+        die("audio mp3 not produced", "check yt-dlp output above")
     produced(mp3)
 
     # --- source video (kept for later frame extraction) ---
@@ -454,86 +462,35 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
 
 
 # ===========================================================================
-# STAGE 5 — BUILD DECK  (substudy export csv + merge translations)
+# STAGE 5 — BUILD DECK  (substudy export csv + merge translations -> .apkg)
 # ===========================================================================
 def _find_substudy_csv(out_dir: Path) -> Path:
+    # substudy nests output in a <name>_csv/ subdir, so search recursively
     for name in ("cards.csv", "index.csv", "export.csv"):
-        p = out_dir / name
-        if p.exists():
-            return p
-    csvs = list(out_dir.glob("*.csv"))
+        hits = list(out_dir.rglob(name))
+        if hits:
+            return hits[0]
+    csvs = list(out_dir.rglob("*.csv"))
     if csvs:
         return csvs[0]
     die(f"could not find substudy csv in {out_dir}", "inspect that folder manually")
 
 
-def _audio_field(row: dict, row_vals: list[str]) -> str | None:
-    """Find an mp3/audio reference in a substudy csv row."""
-    for v in list(row.values()) + row_vals:
-        if isinstance(v, str) and v.strip().lower().endswith((".mp3", ".m4a", ".wav", ".oga", ".ogg")):
-            return Path(v.strip()).name
+_AUDIO_RE = re.compile(r"([^\s\[\]\"'<>:]+\.(?:mp3|m4a|wav|oga|ogg))", re.I)
+
+
+def _audio_field(row_vals: list[str]) -> str | None:
+    """Find an audio clip filename in a substudy csv row.
+
+    substudy wraps it as `[sound:clip.mp3]`, so match the filename anywhere in
+    the field rather than requiring the value to *end* in an audio extension.
+    """
+    for v in row_vals:
+        if isinstance(v, str):
+            m = _AUDIO_RE.search(v)
+            if m:
+                return Path(m.group(1)).name
     return None
-
-
-def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
-                     vid: str, auto_yes: bool) -> tuple[Path, Path]:
-    export_dir = wd / f"{vid}_substudy"
-    final = wd / f"{vid}.anki.tsv"
-
-    if final.exists() and export_dir.exists() and reuse(final):
-        produced(final)
-        _print_import_instructions(final, export_dir)
-        return final, export_dir
-
-    if export_dir.exists():
-        # substudy refuses to overwrite; clear stale dir
-        shutil.rmtree(export_dir)
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    # substudy export csv <media> <foreign-subs>  -> cuts per-cue audio clips + csv
-    run(["substudy", "export", "csv", str(mp3), str(srt_path)], cwd=export_dir)
-
-    sub_csv = _find_substudy_csv(export_dir)
-    info(f"substudy csv: {sub_csv}")
-
-    # english translations aligned to srt order
-    en = []
-    for line in tsv_path.read_text(encoding="utf-8").splitlines():
-        parts = line.split("\t")
-        en.append(parts[1] if len(parts) > 1 else "")
-
-    # read substudy rows (gives us the per-cue audio clip filename + JA text)
-    with sub_csv.open(encoding="utf-8", newline="") as f:
-        reader = csv.reader(f)
-        rows = list(reader)
-    if not rows:
-        die("substudy csv is empty", f"inspect {sub_csv}")
-
-    # detect header vs data
-    header_row = rows[0]
-    has_header = any(not _ts_like(c) and "." not in c for c in header_row) and \
-        not _audio_field({}, header_row)
-    data_rows = rows[1:] if has_header else rows
-    info(f"substudy produced {len(data_rows)} card rows")
-
-    if len(data_rows) != len(en):
-        warn(f"row count mismatch: {len(data_rows)} clips vs {len(en)} translations; "
-             "aligning by index (extra entries dropped)")
-
-    # Build final TAB-separated import file: front=JA, back=EN <br> [sound:clip]
-    with final.open("w", encoding="utf-8", newline="") as f:
-        n = min(len(data_rows), len(en))
-        for i in range(n):
-            row_vals = data_rows[i]
-            audio = _audio_field({}, row_vals)
-            ja = _japanese_field(row_vals)
-            back = en[i]
-            if audio:
-                back = f"{back}<br>[sound:{audio}]"
-            f.write(f"{ja}\t{back}\n")
-    produced(final)
-    _print_import_instructions(final, export_dir)
-    return final, export_dir
 
 
 def _ts_like(s: str) -> bool:
@@ -555,15 +512,121 @@ def _japanese_field(row_vals: list[str]) -> str:
     return max(cand, key=len).strip()
 
 
-def _print_import_instructions(final: Path, export_dir: Path) -> None:
-    media = "~/.local/share/Anki2/<profile>/collection.media/"
+# --- .apkg writer (genanki) ------------------------------------------------
+# Stable ids so re-imports update the same model/deck instead of duplicating.
+APKG_MODEL_ID = 1726000000001
+APKG_DECK_ID = 1726000000002
+_APKG_CSS = (
+    ".card{font-family:arial;font-size:28px;text-align:center;"
+    "color:black;background:white}"
+)
+
+
+def write_apkg(out_path: Path, deck_name: str,
+               cards: list[tuple[str, str, list[Path]]]) -> None:
+    """Write a self-contained Anki .apkg (Basic note type: Front / Back).
+
+    cards: (front_html, back_html, [media_paths]). Media files are bundled into
+    the package, so no manual copy into collection.media is needed on import.
+    """
+    try:
+        import genanki
+    except ImportError:
+        die("genanki not installed (needed to build the .apkg)",
+            "python3 -m pip install genanki")
+
+    model = genanki.Model(
+        APKG_MODEL_ID, "yt2anki Basic",
+        fields=[{"name": "Front"}, {"name": "Back"}],
+        templates=[{
+            "name": "Card 1",
+            "qfmt": "{{Front}}",
+            "afmt": "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}",
+        }],
+        css=_APKG_CSS,
+    )
+    deck = genanki.Deck(APKG_DECK_ID, deck_name)
+    media: list[str] = []
+    for front, back, paths in cards:
+        deck.add_note(genanki.Note(model=model, fields=[front, back]))
+        media.extend(str(p) for p in paths)
+
+    genanki.Package(deck, media_files=media).write_to_file(str(out_path))
+
+
+def _print_import_instructions(apkg: Path) -> None:
     print()
     print(_c("1;32", "  HOW TO IMPORT INTO ANKI"))
-    print(_c("0;37", f"   1. Copy clips:  cp {export_dir}/*.mp3  {media}"))
-    print(_c("0;37", f"   2. Anki: File > Import > {final}"))
-    print(_c("0;37", "   3. Type: Basic. Field separator: Tab. Allow HTML in fields: YES."))
-    print(_c("0;37", "   4. Field mapping:  column 1 -> Front (Japanese)"))
-    print(_c("0;37", "                      column 2 -> Back  (English + [sound:...])"))
+    print(_c("0;37", f"   Double-click {apkg}  (or Anki: File > Import > that file)."))
+    print(_c("0;37", "   Audio is bundled in the .apkg; no manual media copying needed."))
+
+
+def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
+                     vid: str, auto_yes: bool) -> tuple[Path, Path]:
+    export_dir = wd / f"{vid}_substudy"
+    apkg = wd / f"{vid}.apkg"
+
+    if apkg.exists() and reuse(apkg):
+        produced(apkg)
+        _print_import_instructions(apkg)
+        return apkg, export_dir
+
+    if export_dir.exists():
+        # substudy refuses to overwrite; clear stale dir
+        shutil.rmtree(export_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    # substudy export csv <media> <foreign-subs>  -> cuts per-cue audio clips + csv
+    # absolute paths: we run with cwd=export_dir, so relative inputs wouldn't resolve
+    run(["substudy", "export", "csv", str(mp3.resolve()), str(srt_path.resolve())],
+        cwd=export_dir)
+
+    sub_csv = _find_substudy_csv(export_dir)
+    clip_dir = sub_csv.parent  # mp3 clips live next to the csv
+    info(f"substudy csv: {sub_csv}")
+
+    # english translations aligned to srt order
+    en = []
+    for line in tsv_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        en.append(parts[1] if len(parts) > 1 else "")
+
+    # read substudy rows (gives us the per-cue audio clip filename + JA text)
+    with sub_csv.open(encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        die("substudy csv is empty", f"inspect {sub_csv}")
+
+    # detect header vs data
+    header_row = rows[0]
+    has_header = any(not _ts_like(c) and "." not in c for c in header_row) and \
+        not _audio_field(header_row)
+    data_rows = rows[1:] if has_header else rows
+    info(f"substudy produced {len(data_rows)} card rows")
+
+    if len(data_rows) != len(en):
+        warn(f"row count mismatch: {len(data_rows)} clips vs {len(en)} translations; "
+             "aligning by index (extra entries dropped)")
+
+    # Build cards: front=JA, back=EN <br> [sound:clip]; bundle each clip file.
+    cards: list[tuple[str, str, list[Path]]] = []
+    for i in range(min(len(data_rows), len(en))):
+        row_vals = data_rows[i]
+        ja = _japanese_field(row_vals)
+        back = en[i]
+        clips: list[Path] = []
+        audio = _audio_field(row_vals)
+        if audio:
+            clip = clip_dir / audio
+            if clip.exists():
+                back = f"{back}<br>[sound:{audio}]"
+                clips.append(clip)
+        cards.append((ja, back, clips))
+
+    write_apkg(apkg, f"yt2anki::{vid}", cards)
+    produced(apkg)
+    _print_import_instructions(apkg)
+    return apkg, export_dir
 
 
 # ===========================================================================
@@ -612,13 +675,12 @@ def main() -> None:
                                args.translate_model, args.yes)
     gate(args.yes)
 
-    header(5, STAGES_TOTAL, "BUILD DECK (substudy export csv + merge)")
-    final, export_dir = stage_build_deck(mp3, srt_path, tsv_path, wd, vid, args.yes)
+    header(5, STAGES_TOTAL, "BUILD DECK (substudy clips + translations -> .apkg)")
+    apkg, export_dir = stage_build_deck(mp3, srt_path, tsv_path, wd, vid, args.yes)
     gate(args.yes)
 
     print()
-    good(f"DONE. Import file: {final}")
-    good(f"Audio clips dir:  {export_dir}")
+    good(f"DONE. Anki deck: {apkg}")
 
 
 if __name__ == "__main__":
