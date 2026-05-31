@@ -545,6 +545,26 @@ def ruby_to_html(text: str) -> str:
     return _RUBY_RE.sub(r"<ruby>\1<rt>\2</rt></ruby>", text)
 
 
+# alignment groups are wrapped by the LLM as [[n]]...[[/n]] in both sentences;
+# the same n gets the same color so matching words line up across source/target.
+ALIGN_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd",
+                "#17a2b8", "#8c564b", "#e377c2", "#bcbd22", "#393b79"]
+_GROUP_RE = re.compile(r"\[\[(\d+)\]\](.*?)\[\[/\1\]\]", re.S)
+
+
+def colorize(text: str) -> str:
+    """`[[1]]today[[/1]]` -> `<span style="color:…">today</span>`.
+
+    Color is picked by group number; stray/unmatched tags are stripped so a
+    malformed LLM response degrades to plain text rather than leaking `[[..]]`.
+    """
+    def repl(m: re.Match) -> str:
+        color = ALIGN_COLORS[(int(m.group(1)) - 1) % len(ALIGN_COLORS)]
+        return f'<span style="color:{color}">{m.group(2)}</span>'
+
+    return re.sub(r"\[\[/?\d+\]\]", "", _GROUP_RE.sub(repl, text))
+
+
 def _extract_json_array(text: str) -> list[str]:
     m = re.search(r"\[.*\]", text, re.S)
     if not m:
@@ -554,6 +574,54 @@ def _extract_json_array(text: str) -> list[str]:
         return [str(x) for x in arr]
     except json.JSONDecodeError:
         return []
+
+
+def _extract_json(text: str):
+    """Parse the first top-level JSON array found (elements kept as-is)."""
+    m = re.search(r"\[.*\]", text, re.S)
+    if not m:
+        return []
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return []
+
+
+def anthropic_align(srcs: list[str], tgts: list[str], model: str) -> list[tuple[str, str]]:
+    """Tag corresponding word groups in each source/target pair with [[n]] tags.
+
+    Returns (tagged_src, tagged_target) per pair; `colorize` later turns matching
+    tag numbers into matching colors. The source keeps any furigana notation.
+    """
+    instruction = (
+        "For each numbered SOURCE/TARGET sentence pair, mark the parts that "
+        "correspond. Wrap each group of corresponding words in matching tags "
+        "[[n]]...[[/n]] in BOTH the source and the target, using the same number "
+        "n for parts that mean the same thing. Number groups 1,2,3,... restarting "
+        "per pair. Leave grammatical words with no counterpart untagged. Do not "
+        "reorder, translate, or change any characters, including existing furigana "
+        "like 今日[きょう]; only insert the [[n]] tags. Return ONLY a JSON array, "
+        'one object per pair in order, each {"src": "<tagged source>", '
+        '"tgt": "<tagged target>"}, no commentary.'
+    )
+    out: list[tuple[str, str]] = []
+    BATCH = 30
+    for i in range(0, len(srcs), BATCH):
+        cs, ct = srcs[i:i + BATCH], tgts[i:i + BATCH]
+        items = "\n".join(
+            f"{j+1}. SOURCE: {s}\n   TARGET: {t}"
+            for j, (s, t) in enumerate(zip(cs, ct)))
+        arr = _extract_json(_anthropic_call(instruction + "\n\n" + items, model, 8192))
+        if not isinstance(arr, list) or len(arr) != len(cs):
+            warn(f"batch {i//BATCH}: expected {len(cs)} alignments, got "
+                 f"{len(arr) if isinstance(arr, list) else 'none'}; leaving plain")
+            arr = (list(arr) if isinstance(arr, list) else []) + [{}] * len(cs)
+            arr = arr[:len(cs)]
+        for o in arr:
+            out.append((o.get("src", ""), o.get("tgt", "")) if isinstance(o, dict)
+                       else ("", ""))
+        info(f"aligned {min(i+BATCH, len(srcs))}/{len(srcs)}")
+    return out
 
 
 # backend registry: swap translation backend by name without touching callers
@@ -571,7 +639,7 @@ def translate_sentences(sentences: list[str], backend: str, model: str,
 
 def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
                     model: str, source_lang: str, user_lang: str,
-                    auto_yes: bool) -> tuple[Path, bool]:
+                    align: bool, auto_yes: bool) -> tuple[Path, bool]:
     tsv_path = wd / f"{vid}.tsv"
     if reuse(tsv_path, auto_yes):
         produced(tsv_path)
@@ -586,19 +654,28 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
     tgt = translate_sentences(src, backend, model, source_lang, user_lang)
 
     # furigana column (Anki ruby notation), JA source via Anthropic only; empty
-    # otherwise so the TSV layout stays src \t translation \t furigana.
+    # otherwise. TSV layout: src \t translation \t furigana \t algn_src \t algn_tgt
     if source_lang.lower() == "ja" and backend == "anthropic":
         info(f"adding furigana to {len(src)} sentences")
         fura = anthropic_furigana(src, model)
     else:
         fura = [""] * len(src)
 
+    # color-alignment columns (LLM tags matching word groups in both sentences);
+    # align on the furigana source where present so the colors keep the readings.
+    if align and backend == "anthropic":
+        info(f"aligning {len(src)} sentence pairs")
+        algn_src = [fura[i] if fura[i].strip() else src[i] for i in range(len(src))]
+        aligned = anthropic_align(algn_src, tgt, model)
+    else:
+        aligned = [("", "")] * len(src)
+
     def clean(x: str) -> str:
         return x.replace("\t", " ").replace("\n", " ")
 
     with tsv_path.open("w", encoding="utf-8", newline="") as f:
-        for s, t, fr in zip(src, tgt, fura):
-            f.write(clean(s) + "\t" + clean(t) + "\t" + clean(fr) + "\n")
+        for s, t, fr, (asrc, atgt) in zip(src, tgt, fura, aligned):
+            f.write("\t".join(clean(x) for x in (s, t, fr, asrc, atgt)) + "\n")
     produced(tsv_path)
     return tsv_path, True
 
@@ -701,12 +778,14 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
     if not cues:
         die("no cues in SRT", f"inspect {srt_path}")
 
-    # translations (col 2) + optional furigana (col 3) aligned to srt order
-    en, fura = [], []
+    # TSV cols: 1 src, 2 translation, 3 furigana, 4 aligned-src, 5 aligned-tgt
+    en, fura, asrc, atgt = [], [], [], []
     for line in tsv_path.read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")
         en.append(parts[1] if len(parts) > 1 else "")
         fura.append(parts[2] if len(parts) > 2 else "")
+        asrc.append(parts[3] if len(parts) > 3 else "")
+        atgt.append(parts[4] if len(parts) > 4 else "")
     if len(cues) != len(en):
         warn(f"row count mismatch: {len(cues)} cues vs {len(en)} translations; "
              "aligning by index (extra entries dropped)")
@@ -720,10 +799,17 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
         clip = clip_dir / name
         cut_clip(mp3, _srt_ts_to_sec(c["start"]), _srt_ts_to_sec(c["end"]),
                  clip_pad, clip)
-        # show furigana ruby when available, else the plain cue text
-        sentence = ruby_to_html(fura[i]) if fura[i].strip() else c["text"]
+        # front: colored+furigana > furigana > plain. ruby runs after colorize so
+        # color spans wrap the ruby. back: colored translation when aligned.
+        if asrc[i].strip():
+            sentence = ruby_to_html(colorize(asrc[i]))
+        elif fura[i].strip():
+            sentence = ruby_to_html(fura[i])
+        else:
+            sentence = c["text"]
         front = f"{sentence}<br>[sound:{name}]"
-        cards.append((front, en[i], [clip]))
+        back = colorize(atgt[i]) if atgt[i].strip() else en[i]
+        cards.append((front, back, [clip]))
 
     write_apkg(apkg, deck_name, cards)
     produced(apkg)
@@ -754,6 +840,9 @@ def main() -> None:
     ap.add_argument("--workdir", default="work", help="base working dir (default: ./work)")
     ap.add_argument("--clip-pad", type=float, default=0.15,
                     help="seconds of audio padding each side of a clip (default: 0.15)")
+    ap.add_argument("--align", action="store_true",
+                    help="color-code matching words across source/translation "
+                         "(extra LLM pass)")
     ap.add_argument("--title", default=None,
                     help="deck title (default: the YouTube video title)")
     args = ap.parse_args()
@@ -794,7 +883,7 @@ def main() -> None:
            f"{args.translate_backend})")
     tsv_path, ran_tr = stage_translate(srt_path, wd, vid, args.translate_backend,
                                        args.translate_model, args.source_lang,
-                                       args.user_lang, args.yes)
+                                       args.user_lang, args.align, args.yes)
 
     header(5, STAGES_TOTAL, "BUILD DECK (ffmpeg clips + translations -> .apkg)")
     upstream_ran = ran_dl or ran_tx or ran_sp or ran_tr
