@@ -6,12 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Single-file CLI (`yt2anki.py`) that turns a YouTube video into an Anki deck for
 language learning (source language set via `--source-lang`, translated into
-`--user-lang`, default `en`). Mostly stdlib; one pip dep (`genanki`, lazily
-imported in `write_apkg`) and several external CLI tools it orchestrates.
+`--user-lang`, default `en`). Mostly stdlib; pip deps in `requirements.txt`
+(`genanki`, lazily imported in `write_apkg`; plus `yt-dlp` and `openai-whisper`,
+whose `yt-dlp`/`whisper` console scripts it shells out to) and `ffmpeg`, a
+system binary it also orchestrates.
 
 ## Run
 
-Debian is PEP-668 (externally-managed), so genanki lives in a project venv:
+Debian is PEP-668 (externally-managed), so the pip deps live in a project venv.
+`openai-whisper` pulls in torch, so the install is a large download:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -34,7 +37,12 @@ Key flags: `--source-lang` (required), `--user-lang` (default `en`), `--title`,
 unknown codes pass through unchanged.
 
 External tools required (checked at startup with a ✓/✗ checklist, install hints
-printed if missing): `yt-dlp`, `whisper`, `ffmpeg`.
+printed if missing): `yt-dlp`, `whisper`, `ffmpeg`. `yt-dlp` and `whisper` come
+from the venv (`requirements.txt`); `tool()`/`resolve_tool()` locate them in the
+running interpreter's bin dir (`Path(sys.executable).parent`) before falling
+back to `$PATH`, so `.venv/bin/python yt2anki.py` finds them without activating
+the venv. `ffmpeg` stays a system binary (not pip-installable; whisper also
+needs it at runtime).
 
 ## Architecture
 

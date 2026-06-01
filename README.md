@@ -14,27 +14,37 @@ them, and cut the audio into per-sentence clips.
 
 ## What you need
 
-The script needs one Python package ([genanki](https://github.com/kerrickstaley/genanki),
-to build the `.apkg`) and calls these external command-line tools (it checks for
-them on startup and tells you how to install any that are missing):
+The script calls a few external command-line tools (it checks for them on
+startup and tells you how to install any that are missing). Most are Python
+packages installed from `requirements.txt` into the venv; only `ffmpeg` is a
+separate system binary:
 
 | Tool | What it does | Install                                      |
 | --- | --- |----------------------------------------------|
-| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | downloads the video & audio | `pipx install yt-dlp`                        |
-| [whisper](https://github.com/openai/whisper) | transcribes the speech with word-level timing | `pipx install openai-whisper`                |
+| [genanki](https://github.com/kerrickstaley/genanki) | builds the `.apkg` deck | `requirements.txt`                           |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | downloads the video & audio | `requirements.txt`                           |
+| [whisper](https://github.com/openai/whisper) | transcribes the speech with word-level timing | `requirements.txt` (pulls in torch — large)  |
 | [ffmpeg](https://ffmpeg.org/) | cuts the per-sentence audio clips | `apt install ffmpeg` / `brew install ffmpeg` |
+
+`yt-dlp` and `whisper` are found in the venv automatically — no need to activate
+it or install them globally. `ffmpeg` stays a system dependency (it isn't
+pip-installable, and whisper needs it at runtime too).
 
 You also need an [Anthropic API key](https://console.anthropic.com/) for the
 translation step.
 
 ## Setup
 
-1. Install the Python dependency in a virtual environment:
+1. Install the Python dependencies in a virtual environment (this includes
+   whisper's torch, so it's a large download the first time):
 
    ```bash
    python3 -m venv .venv
    .venv/bin/pip install -r requirements.txt
    ```
+
+   Then install `ffmpeg` via your system package manager
+   (`apt install ffmpeg` / `brew install ffmpeg`).
 
 2. Put your API key in a `.env` file next to the script:
 

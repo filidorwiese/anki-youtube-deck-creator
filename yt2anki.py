@@ -175,20 +175,35 @@ def reuse(path: Path, auto_yes: bool) -> bool:
 # Tool checks
 # ---------------------------------------------------------------------------
 INSTALL_HINTS = {
-    "yt-dlp": "pipx install yt-dlp   (or: python3 -m pip install -U yt-dlp)",
-    "whisper": "pipx install openai-whisper (or: python3 -m pip install -U openai-whisper)",
+    "yt-dlp": "pip install -r requirements.txt   (or: pipx install yt-dlp)",
+    "whisper": "pip install -r requirements.txt   (or: pipx install openai-whisper)",
     "ffmpeg": "sudo apt install ffmpeg   (Debian/Ubuntu)",
 }
 
 
-def have(tool: str) -> bool:
-    return shutil.which(tool) is not None
+def resolve_tool(name: str) -> str | None:
+    """Locate a CLI tool, preferring the running interpreter's bin dir over $PATH.
+
+    Lets `.venv/bin/python yt2anki.py` find venv-installed console scripts
+    (yt-dlp, whisper from requirements.txt) without activating the venv.
+    """
+    venv_bin = Path(sys.executable).parent
+    return shutil.which(name, path=str(venv_bin)) or shutil.which(name)
+
+
+def tool(name: str) -> str:
+    """Resolved path for invocation; bare name as a last resort so errors read."""
+    return resolve_tool(name) or name
+
+
+def have(name: str) -> bool:
+    return resolve_tool(name) is not None
 
 
 def check_tools(required: list[str], optional: list[str] = ()) -> None:
     """Print a ✓/✗ checklist of tools found on $PATH. Exit if a required one is missing."""
     print()
-    print(_c("1;36", "  Tool check ($PATH)"))
+    print(_c("1;36", "  Tool check (venv bin + $PATH)"))
     missing = []
     for t in required:
         if have(t):
@@ -219,7 +234,7 @@ def video_id(url: str) -> str:
     if have("yt-dlp"):
         try:
             out = subprocess.run(
-                ["yt-dlp", "--print", "id", "--skip-download", url],
+                [tool("yt-dlp"), "--print", "id", "--skip-download", url],
                 capture_output=True, text=True, check=True,
             )
             vid = out.stdout.strip().splitlines()[-1]
@@ -238,7 +253,7 @@ def video_title(url: str, wd: Path, vid: str) -> str:
     if have("yt-dlp"):
         try:
             out = subprocess.run(
-                ["yt-dlp", "--print", "title", "--skip-download", url],
+                [tool("yt-dlp"), "--print", "title", "--skip-download", url],
                 capture_output=True, text=True, check=True,
             )
             title = out.stdout.strip().splitlines()[-1].strip()
@@ -266,7 +281,7 @@ def stage_download(url: str, wd: Path, vid: str, auto_yes: bool) -> tuple[Path, 
     if reuse(mp3, auto_yes):
         info("skipping audio download")
     else:
-        run(["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0",
+        run([tool("yt-dlp"), "-x", "--audio-format", "mp3", "--audio-quality", "0",
              "-o", str(wd / f"{vid}.%(ext)s"), url])
         ran = True
     if not mp3.exists():
@@ -278,7 +293,7 @@ def stage_download(url: str, wd: Path, vid: str, auto_yes: bool) -> tuple[Path, 
         video = existing_video
         info("skipping video download")
     else:
-        run(["yt-dlp", "-f", "bv*+ba/b", "--merge-output-format", "mp4",
+        run([tool("yt-dlp"), "-f", "bv*+ba/b", "--merge-output-format", "mp4",
              "-o", str(wd / f"{vid}.%(ext)s"), url])
         video = next(
             (p for p in wd.glob(f"{vid}.*") if p.suffix.lower() in (".mp4", ".mkv", ".webm")),
@@ -314,7 +329,7 @@ def stage_transcribe(mp3: Path, wd: Path, vid: str, model: str,
     if reuse(out_json, auto_yes):
         produced(out_json)
         return out_json, False
-    run(["whisper", str(mp3),
+    run([tool("whisper"), str(mp3),
          "--language", source_lang, "--task", "transcribe",
          "--word_timestamps", "True", "--model", model,
          "--output_format", "json", "--output_dir", str(wd)])
