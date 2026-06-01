@@ -742,6 +742,16 @@ def cut_clip(mp3: Path, start: float, end: float, pad: float, out: Path) -> None
     )
 
 
+def cut_frame(video: Path, t: float, out: Path, width: int = 480) -> None:
+    """Grab one JPEG frame from `video` at time t (s), downscaled to `width`."""
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+         "-ss", f"{max(0.0, t):.3f}", "-i", str(video),
+         "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "3", str(out)],
+        check=True,
+    )
+
+
 # --- .apkg writer (genanki) ------------------------------------------------
 # Stable ids so re-imports update the same model/deck instead of duplicating.
 APKG_MODEL_ID = 1726000000001
@@ -791,9 +801,10 @@ def _print_import_instructions(apkg: Path) -> None:
     print(_c("0;37", "   Audio is bundled in the .apkg; no manual media copying needed."))
 
 
-def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
-                     vid: str, deck_name: str, clip_pad: float,
-                     upstream_ran: bool, auto_yes: bool) -> tuple[Path, Path]:
+def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
+                     wd: Path, vid: str, deck_name: str, clip_pad: float,
+                     screenshots: bool, upstream_ran: bool,
+                     auto_yes: bool) -> tuple[Path, Path]:
     clip_dir = wd / f"{vid}_clips"
     apkg = wd / f"{vid}.apkg"
 
@@ -827,8 +838,13 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
         warn(f"row count mismatch: {len(cues)} cues vs {len(en)} translations; "
              "aligning by index (extra entries dropped)")
 
+    shots = screenshots and video is not None and video.exists()
+    if screenshots and not shots:
+        warn("no source video found; skipping screenshots")
+
     # cut one tight clip per cue with ffmpeg (pad each side by clip_pad)
-    info(f"cutting {len(cues)} clips (pad {clip_pad:.2f}s each side)")
+    info(f"cutting {len(cues)} clips (pad {clip_pad:.2f}s each side)"
+         + (" + screenshots" if shots else ""))
     cards: list[tuple[str, str, list[Path]]] = []
     for i in range(min(len(cues), len(en))):
         c = cues[i]
@@ -836,6 +852,14 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
         clip = clip_dir / name
         cut_clip(mp3, _srt_ts_to_sec(c["start"]), _srt_ts_to_sec(c["end"]),
                  clip_pad, clip)
+        media = [clip]
+        # a frame just after the sentence start dodges scene-cut/black frames
+        img_tag = ""
+        if shots:
+            img = clip_dir / f"{vid}_{i:05d}.jpg"
+            cut_frame(video, _srt_ts_to_sec(c["start"]) + 0.3, img)
+            img_tag = f'<img src="{img.name}"><br>'
+            media.append(img)
         # front: colored+furigana > furigana > plain. ruby runs after colorize so
         # color spans wrap the ruby. back: colored translation when aligned.
         if asrc[i].strip():
@@ -844,9 +868,9 @@ def stage_build_deck(mp3: Path, srt_path: Path, tsv_path: Path, wd: Path,
             sentence = ruby_to_html(fura[i])
         else:
             sentence = c["text"]
-        front = f"{sentence}<br>[sound:{name}]"
+        front = f"{img_tag}{sentence}<br>[sound:{name}]"
         back = colorize(atgt[i]) if atgt[i].strip() else en[i]
-        cards.append((front, back, [clip]))
+        cards.append((front, back, media))
 
     write_apkg(apkg, deck_name, cards)
     produced(apkg)
@@ -880,6 +904,9 @@ def main() -> None:
     ap.add_argument("--color-words", action="store_true",
                     help="color-code matching words across source/translation "
                          "(extra LLM pass)")
+    ap.add_argument("--screenshots", action="store_true",
+                    help="add a video frame (at each sentence start) to the card "
+                         "front (larger .apkg)")
     ap.add_argument("--title", default=None,
                     help="deck title (default: the YouTube video title)")
     args = ap.parse_args()
@@ -905,7 +932,7 @@ def main() -> None:
     good(f"deck name: {deck_name}")
 
     header(1, STAGES_TOTAL, "DOWNLOAD (yt-dlp: mp3 audio + source video)")
-    mp3, _video, ran_dl = stage_download(args.url, wd, vid, args.yes)
+    mp3, video, ran_dl = stage_download(args.url, wd, vid, args.yes)
 
     header(2, STAGES_TOTAL,
            f"TRANSCRIBE (Whisper, model={args.model}, lang={args.source_lang})")
@@ -925,9 +952,9 @@ def main() -> None:
 
     header(5, STAGES_TOTAL, "BUILD DECK (ffmpeg clips + translations -> .apkg)")
     upstream_ran = ran_dl or ran_tx or ran_sp or ran_tr
-    apkg, _clip_dir = stage_build_deck(mp3, srt_path, tsv_path, wd, vid,
-                                       deck_name, args.clip_pad, upstream_ran,
-                                       args.yes)
+    apkg, _clip_dir = stage_build_deck(mp3, video, srt_path, tsv_path, wd, vid,
+                                       deck_name, args.clip_pad, args.screenshots,
+                                       upstream_ran, args.yes)
 
     print()
     good(f"DONE. Anki deck: {apkg}")

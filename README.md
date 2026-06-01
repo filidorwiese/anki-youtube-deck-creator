@@ -66,6 +66,7 @@ Handy options:
 | `--title` | video title         | name the deck yourself (skips the title prompt) |
 | `--clip-pad` | `0.50`              | seconds of audio padding added to each side of a clip |
 | `--color-words` | off                 | color-code matching words across the source and translation (extra Claude pass) |
+| `--screenshots` | off                 | add a video frame (at each sentence start) to the card front (larger `.apkg`) |
 | `--model` | `small`             | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
 | `--translate-model` | `claude-sonnet-4-6` | which Claude model translates |
 | `--workdir` | `./work`            | where intermediate files are saved |
@@ -98,5 +99,6 @@ The pipeline runs in five steps:
    adds furigana readings, and with `--color-words` it tags which source
    words match which translation words so they can be colored the same.
 5. **Build the deck** — cut a tight audio clip per sentence (ffmpeg, padded by
-   `--clip-pad`) and package the sentences, translations, and clips into a single
+   `--clip-pad`), optionally grab a video frame per sentence (`--screenshots`),
+   and package the sentences, translations, clips, and frames into a single
    `.apkg` (genanki).
