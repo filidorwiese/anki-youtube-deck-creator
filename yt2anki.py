@@ -176,7 +176,7 @@ def reuse(path: Path, auto_yes: bool) -> bool:
 # ---------------------------------------------------------------------------
 INSTALL_HINTS = {
     "yt-dlp": "pipx install yt-dlp   (or: python3 -m pip install -U yt-dlp)",
-    "whisper": "pipx instal openai-whisper (or: python3 -m pip install -U openai-whisper)",
+    "whisper": "pipx install openai-whisper (or: python3 -m pip install -U openai-whisper)",
     "ffmpeg": "sudo apt install ffmpeg   (Debian/Ubuntu)",
 }
 
