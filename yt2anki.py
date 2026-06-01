@@ -537,9 +537,13 @@ def anthropic_translate_annotate(sentences: list[str], model: str,
         "append its kana reading in square brackets, e.g. 今日[きょう]は早[はや]"
         "いです, adding nothing else, no spaces, leaving kana/punctuation/numbers "
         "unchanged;\n"
-        f"g = one short {lang_name(user_lang)} note (max ~15 words) on the most "
-        "useful grammar or usage point in the sentence (a particle, verb form, or "
-        "set phrase), or an empty string if nothing is noteworthy.\n"
+        f"g = a short {lang_name(user_lang)} note (max ~30 words) helping an A1 "
+        "learner parse the sentence. Cover the most useful grammar/usage point "
+        "(a particle, set phrase, etc.) AND, when the sentence has a conjugated "
+        "verb, adjective or adverb, name it and give its dictionary/plain form "
+        "with the reading in parentheses, e.g. 'came = 来ました, polite past of "
+        "来る (くる)'. Keep it terse; readings in parentheses, never in square "
+        "brackets. Empty string only if truly trivial.\n"
         "Return ONLY a JSON array, one object per sentence in order, each "
         '{"t": "...", "f": "...", "g": "..."}, with no numbering and no commentary.'
     )
