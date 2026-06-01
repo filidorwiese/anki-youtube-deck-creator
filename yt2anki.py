@@ -519,27 +519,32 @@ def _anthropic_translate(sentences: list[str], model: str,
     return _anthropic_batch(sentences, model, instruction, "translated")
 
 
-def anthropic_translate_furigana(sentences: list[str], model: str,
+def anthropic_translate_annotate(sentences: list[str], model: str,
                                  source_lang: str, user_lang: str
-                                 ) -> tuple[list[str], list[str]]:
-    """One call per batch that BOTH translates and adds furigana (saves a pass).
+                                 ) -> tuple[list[str], list[str], list[str]]:
+    """One call per batch: translation + furigana + a short grammar note.
 
-    Returns (translations, furigana_sentences). Furigana is Anki ruby notation
-    (`今日[きょう]`) that `ruby_to_html` renders later. Used for JA + anthropic;
-    other languages/backends go through `translate_sentences` instead.
+    Returns (translations, furigana_sentences, grammar_notes). Furigana is Anki
+    ruby notation (`今日[きょう]`) that `ruby_to_html` renders later. Used for
+    JA + anthropic; other languages/backends go through `translate_sentences`.
     """
     instruction = (
-        f"For each numbered {lang_name(source_lang)} sentence, return its "
-        f"translation into natural but faithful {lang_name(user_lang)} for an A1 "
-        "beginner, and a furigana copy of the original: immediately after every "
-        "kanji run append its kana reading in square brackets, e.g. "
-        "今日[きょう]は早[はや]いです, adding nothing else, no spaces, and leaving "
-        "kana, punctuation and numbers unchanged. Return ONLY a JSON array, one "
-        'object per sentence in order, each {"t": "<translation>", '
-        '"f": "<furigana sentence>"}, with no numbering and no commentary.'
+        f"For each numbered {lang_name(source_lang)} sentence, return an object "
+        "with three fields:\n"
+        f't = its translation into natural but faithful {lang_name(user_lang)} '
+        "for an A1 beginner;\n"
+        "f = a furigana copy of the original: immediately after every kanji run "
+        "append its kana reading in square brackets, e.g. 今日[きょう]は早[はや]"
+        "いです, adding nothing else, no spaces, leaving kana/punctuation/numbers "
+        "unchanged;\n"
+        f"g = one short {lang_name(user_lang)} note (max ~15 words) on the most "
+        "useful grammar or usage point in the sentence (a particle, verb form, or "
+        "set phrase), or an empty string if nothing is noteworthy.\n"
+        "Return ONLY a JSON array, one object per sentence in order, each "
+        '{"t": "...", "f": "...", "g": "..."}, with no numbering and no commentary.'
     )
     strip = lambda x: re.sub(r"^\s*\d+\.\s*", "", str(x))  # noqa: E731
-    tgt, fura = [], []
+    tgt, fura, notes = [], [], []
     BATCH = 40
     for i in range(0, len(sentences), BATCH):
         chunk = sentences[i:i + BATCH]
@@ -554,8 +559,9 @@ def anthropic_translate_furigana(sentences: list[str], model: str,
             o = o if isinstance(o, dict) else {}
             tgt.append(strip(o.get("t", "")))
             fura.append(strip(o.get("f", "")))
-        info(f"translated+furigana {min(i+BATCH, len(sentences))}/{len(sentences)}")
-    return tgt, fura
+            notes.append(strip(o.get("g", "")))
+        info(f"translated+annotated {min(i+BATCH, len(sentences))}/{len(sentences)}")
+    return tgt, fura, notes
 
 
 # a kanji run directly followed by [reading] -> <ruby> for Anki/HTML display.
@@ -569,9 +575,13 @@ def ruby_to_html(text: str) -> str:
 
 
 # alignment groups are wrapped by the LLM as [[n]]...[[/n]] in both sentences;
-# the same n gets the same color so matching words line up across source/target.
-ALIGN_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd",
-                "#17a2b8", "#8c564b", "#e377c2", "#bcbd22", "#393b79"]
+# the same n gets a `w<k>` class so matching words share a color. Two palettes
+# (light + night) are defined as CSS classes, not inline styles, so the
+# `.nightMode` overrides can win on Anki's dark theme.
+ALIGN_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#e67e22", "#8e44ad",
+                "#138d90", "#8c564b", "#c0399b", "#b8860b", "#2c3e8c"]
+ALIGN_COLORS_NIGHT = ["#6db3f2", "#ff7b72", "#6fdc6f", "#f5a25d", "#c89bf0",
+                      "#4ecdc4", "#c89b8f", "#f08ec4", "#e6c84e", "#9fa8da"]
 _GROUP_RE = re.compile(r"\[\[(\d+)\]\](.*?)\[\[/\1\]\]", re.S)
 
 
@@ -581,14 +591,15 @@ def _group_nums(text: str) -> set[int]:
 
 
 def colorize(text: str) -> str:
-    """`[[1]]today[[/1]]` -> `<span style="color:…">today</span>`.
+    """`[[1]]today[[/1]]` -> `<span class="w1">today</span>`.
 
-    Color is picked by group number; stray/unmatched tags are stripped so a
-    malformed LLM response degrades to plain text rather than leaking `[[..]]`.
+    The class (not an inline color) lets the stylesheet swap palettes in night
+    mode; stray/unmatched tags are stripped so a malformed LLM response degrades
+    to plain text rather than leaking `[[..]]`.
     """
     def repl(m: re.Match) -> str:
-        color = ALIGN_COLORS[(int(m.group(1)) - 1) % len(ALIGN_COLORS)]
-        return f'<span style="color:{color}">{m.group(2)}</span>'
+        k = (int(m.group(1)) - 1) % len(ALIGN_COLORS) + 1
+        return f'<span class="w{k}">{m.group(2)}</span>'
 
     return re.sub(r"\[\[/?\d+\]\]", "", _GROUP_RE.sub(repl, text))
 
@@ -684,19 +695,21 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
         die("SRT empty/malformed; nothing to translate", f"inspect {srt_path}")
     src = [c["text"] for c in cues]
 
-    # JA + anthropic: translate and furigana in one call. Other languages/backends
-    # translate via the registry and get an empty furigana column.
-    # TSV layout: src \t translation \t furigana \t algn_src \t algn_tgt
+    # JA + anthropic: translation + furigana + grammar note in one call. Other
+    # languages/backends translate via the registry (no furigana/note columns).
+    # TSV: src \t translation \t furigana \t algn_src \t algn_tgt \t grammar_note
     if source_lang.lower() == "ja" and backend == "anthropic":
-        info(f"translating + furigana {len(src)} sentences -> "
+        info(f"translating + annotating {len(src)} sentences -> "
              f"{lang_name(user_lang)} ({model})")
-        tgt, fura = anthropic_translate_furigana(src, model, source_lang, user_lang)
+        tgt, fura, notes = anthropic_translate_annotate(src, model, source_lang,
+                                                        user_lang)
     else:
         info(f"translating {len(src)} sentences "
              f"{lang_name(source_lang)}->{lang_name(user_lang)} "
              f"via backend '{backend}' ({model})")
         tgt = translate_sentences(src, backend, model, source_lang, user_lang)
         fura = [""] * len(src)
+        notes = [""] * len(src)
 
     # color-alignment columns (LLM tags matching word groups in both sentences);
     # align on the furigana source where present so the colors keep the readings.
@@ -711,8 +724,8 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
         return x.replace("\t", " ").replace("\n", " ")
 
     with tsv_path.open("w", encoding="utf-8", newline="") as f:
-        for s, t, fr, (asrc, atgt) in zip(src, tgt, fura, aligned):
-            f.write("\t".join(clean(x) for x in (s, t, fr, asrc, atgt)) + "\n")
+        for s, t, fr, (asrc, atgt), g in zip(src, tgt, fura, aligned, notes):
+            f.write("\t".join(clean(x) for x in (s, t, fr, asrc, atgt, g)) + "\n")
     produced(tsv_path)
     return tsv_path, True
 
@@ -756,10 +769,24 @@ def cut_frame(video: Path, t: float, out: Path, width: int = 480) -> None:
 # Stable ids so re-imports update the same model/deck instead of duplicating.
 APKG_MODEL_ID = 1726000000001
 APKG_DECK_ID = 1726000000002
-_APKG_CSS = (
-    ".card{font-family:arial;font-size:28px;text-align:center;"
-    "color:black;background:white}"
-)
+def _build_css() -> str:
+    """Card CSS: no forced bg/fg (so Anki's night mode applies), responsive
+    image, furigana sizing, dim grammar note, and per-group color classes with
+    a brighter palette under `.nightMode`."""
+    base = (
+        ".card{font-family:arial;font-size:28px;line-height:1.6;text-align:center}"
+        "img{max-width:100%;height:auto;border-radius:8px;margin-bottom:12px}"
+        "ruby rt{font-size:0.5em;font-weight:normal}"
+        ".note{font-size:0.6em;color:#777;margin-top:14px;line-height:1.4}"
+        ".nightMode .note{color:#9aa0a6}"
+    )
+    light = "".join(f".w{i+1}{{color:{c}}}" for i, c in enumerate(ALIGN_COLORS))
+    night = "".join(f".nightMode .w{i+1}{{color:{c}}}"
+                    for i, c in enumerate(ALIGN_COLORS_NIGHT))
+    return base + light + night
+
+
+_APKG_CSS = _build_css()
 
 
 def write_apkg(out_path: Path, deck_name: str,
@@ -826,14 +853,15 @@ def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
     if not cues:
         die("no cues in SRT", f"inspect {srt_path}")
 
-    # TSV cols: 1 src, 2 translation, 3 furigana, 4 aligned-src, 5 aligned-tgt
-    en, fura, asrc, atgt = [], [], [], []
+    # TSV cols: 1 src 2 translation 3 furigana 4 aligned-src 5 aligned-tgt 6 note
+    en, fura, asrc, atgt, note = [], [], [], [], []
     for line in tsv_path.read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")
         en.append(parts[1] if len(parts) > 1 else "")
         fura.append(parts[2] if len(parts) > 2 else "")
         asrc.append(parts[3] if len(parts) > 3 else "")
         atgt.append(parts[4] if len(parts) > 4 else "")
+        note.append(parts[5] if len(parts) > 5 else "")
     if len(cues) != len(en):
         warn(f"row count mismatch: {len(cues)} cues vs {len(en)} translations; "
              "aligning by index (extra entries dropped)")
@@ -870,6 +898,8 @@ def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
             sentence = c["text"]
         front = f"{img_tag}{sentence}<br>[sound:{name}]"
         back = colorize(atgt[i]) if atgt[i].strip() else en[i]
+        if note[i].strip():
+            back += f'<div class="note">{note[i]}</div>'
         cards.append((front, back, media))
 
     write_apkg(apkg, deck_name, cards)
