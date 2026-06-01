@@ -3,9 +3,10 @@
 Turn a YouTube video into an [Anki](https://apps.ankiweb.net/) deck for learning
 a language. Each card is one sentence: the source-language sentence plus its
 audio clip on the front, and a translation into your language on the back.
-Japanese sources also get furigana readings over the kanji and a short grammar
-note on the back, and with `--color-words` the matching words in the source and
-translation are shown in the same color.
+Each card also gets a short grammar/usage note on the back (the key grammar point
+plus the dictionary form of an inflected verb/adjective/adverb). Japanese sources
+additionally get furigana readings over the kanji, and with `--color-words` the
+matching words in the source and translation are shown in the same color.
 
 It's a single Python script that chains together a few command-line tools:
 download the video, transcribe the speech, split it into sentences, translate
@@ -95,10 +96,10 @@ The pipeline runs in five steps:
 2. **Transcribe** the audio with word-level timing (Whisper).
 3. **Split** the transcript into one card per sentence (on sentence punctuation,
    falling back to Whisper's segment boundaries when none is present).
-4. **Translate** each sentence into your language (Claude). For Japanese the same
-   call also adds furigana readings and a short grammar/usage note, and with
-   `--color-words` it tags which source words match which translation words so
-   they can be colored the same.
+4. **Translate** each sentence into your language (Claude). The same call also
+   writes a short grammar/usage note (and, for Japanese, furigana readings), and
+   with `--color-words` it tags which source words match which translation words
+   so they can be colored the same.
 5. **Build the deck** — cut a tight audio clip per sentence (ffmpeg, padded by
    `--clip-pad`), optionally grab a video frame per sentence (`--screenshots`),
    and package the sentences, translations, clips, and frames into a single

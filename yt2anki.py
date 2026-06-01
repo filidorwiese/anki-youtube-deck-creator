@@ -522,30 +522,42 @@ def _anthropic_translate(sentences: list[str], model: str,
 def anthropic_translate_annotate(sentences: list[str], model: str,
                                  source_lang: str, user_lang: str
                                  ) -> tuple[list[str], list[str], list[str]]:
-    """One call per batch: translation + furigana + a short grammar note.
+    """One call per batch: translation + grammar note (+ furigana for Japanese).
 
-    Returns (translations, furigana_sentences, grammar_notes). Furigana is Anki
-    ruby notation (`今日[きょう]`) that `ruby_to_html` renders later. Used for
-    JA + anthropic; other languages/backends go through `translate_sentences`.
+    Returns (translations, furigana_sentences, grammar_notes). Furigana (Anki
+    ruby notation `今日[きょう]`, rendered by `ruby_to_html`) is produced only for
+    Japanese; for other languages that column is empty. Used for any anthropic
+    source language; non-anthropic backends go through `translate_sentences`.
     """
-    instruction = (
-        f"For each numbered {lang_name(source_lang)} sentence, return an object "
-        "with three fields:\n"
-        f't = its translation into natural but faithful {lang_name(user_lang)} '
-        "for an A1 beginner;\n"
+    is_ja = source_lang.lower() == "ja"
+    # furigana field (JA only) and a reading hint in the grammar example
+    furigana_spec = (
         "f = a furigana copy of the original: immediately after every kanji run "
         "append its kana reading in square brackets, e.g. 今日[きょう]は早[はや]"
         "いです, adding nothing else, no spaces, leaving kana/punctuation/numbers "
         "unchanged;\n"
+    ) if is_ja else ""
+    note_example = ("'came = 来ました, polite past of 来る (くる)'" if is_ja
+                    else "'vino = 3rd person past of venir (to come)'")
+    reading_hint = (" with the reading in parentheses, never in square brackets,"
+                    if is_ja else "")
+    instruction = (
+        f"For each numbered {lang_name(source_lang)} sentence, return an object "
+        "with these fields:\n"
+        f't = its translation into natural but faithful {lang_name(user_lang)} '
+        "for an A1 beginner;\n"
+        + furigana_spec +
         f"g = a short {lang_name(user_lang)} note (max ~30 words) helping an A1 "
         "learner parse the sentence. Cover the most useful grammar/usage point "
-        "(a particle, set phrase, etc.) AND, when the sentence has a conjugated "
-        "verb, adjective or adverb, name it and give its dictionary/plain form "
-        "with the reading in parentheses, e.g. 'came = 来ました, polite past of "
-        "来る (くる)'. Keep it terse; readings in parentheses, never in square "
-        "brackets. Empty string only if truly trivial.\n"
+        "(a particle, agreement, set phrase, word order, etc.) AND, when the "
+        "sentence has a conjugated or inflected verb, adjective or adverb, name "
+        "it and give its dictionary/base form (infinitive/lemma)"
+        f"{reading_hint} e.g. {note_example}. Keep it terse. Empty string only "
+        "if truly trivial.\n"
         "Return ONLY a JSON array, one object per sentence in order, each "
-        '{"t": "...", "f": "...", "g": "..."}, with no numbering and no commentary.'
+        + ('{"t": "...", "f": "...", "g": "..."}' if is_ja
+           else '{"t": "...", "g": "..."}')
+        + ", with no numbering and no commentary."
     )
     strip = lambda x: re.sub(r"^\s*\d+\.\s*", "", str(x))  # noqa: E731
     tgt, fura, notes = [], [], []
@@ -699,12 +711,12 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
         die("SRT empty/malformed; nothing to translate", f"inspect {srt_path}")
     src = [c["text"] for c in cues]
 
-    # JA + anthropic: translation + furigana + grammar note in one call. Other
-    # languages/backends translate via the registry (no furigana/note columns).
+    # anthropic: translation + grammar note (+ furigana for JA) in one call.
+    # Non-anthropic backends translate via the registry (no furigana/note columns).
     # TSV: src \t translation \t furigana \t algn_src \t algn_tgt \t grammar_note
-    if source_lang.lower() == "ja" and backend == "anthropic":
-        info(f"translating + annotating {len(src)} sentences -> "
-             f"{lang_name(user_lang)} ({model})")
+    if backend == "anthropic":
+        info(f"translating + annotating {len(src)} sentences "
+             f"{lang_name(source_lang)}->{lang_name(user_lang)} ({model})")
         tgt, fura, notes = anthropic_translate_annotate(src, model, source_lang,
                                                         user_lang)
     else:
