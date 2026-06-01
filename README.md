@@ -68,6 +68,7 @@ Handy options:
 | `--clip-pad` | `0.50`              | seconds of audio padding added to each side of a clip |
 | `--color-words` | off                 | color-code matching words across the source and translation (extra Claude pass) |
 | `--screenshots` | off                 | add a video frame (at each sentence start) to the card front (larger `.apkg`) |
+| `--shot-offset` | `0.3`               | seconds after the sentence start to grab the screenshot (`0` = exact start, risks scene-cut frames) |
 | `--model` | `small`             | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
 | `--translate-model` | `claude-sonnet-4-6` | which Claude model translates |
 | `--workdir` | `./work`            | where intermediate files are saved |

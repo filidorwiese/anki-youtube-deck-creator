@@ -852,7 +852,7 @@ def _print_import_instructions(apkg: Path) -> None:
 
 def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
                      wd: Path, vid: str, deck_name: str, clip_pad: float,
-                     screenshots: bool, upstream_ran: bool,
+                     screenshots: bool, shot_offset: float, upstream_ran: bool,
                      auto_yes: bool) -> tuple[Path, Path]:
     clip_dir = wd / f"{vid}_clips"
     apkg = wd / f"{vid}.apkg"
@@ -903,12 +903,12 @@ def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
         cut_clip(mp3, _srt_ts_to_sec(c["start"]), _srt_ts_to_sec(c["end"]),
                  clip_pad, clip)
         media = [clip]
-        # a frame just after the sentence start dodges scene-cut/black frames;
-        # only reference it if ffmpeg actually produced a non-empty frame
+        # shot_offset steps off the sentence boundary to dodge scene-cut/black
+        # frames; only reference it if ffmpeg produced a non-empty frame
         img_tag = ""
         if shots:
             img = clip_dir / f"{vid}_{i:05d}.jpg"
-            if cut_frame(video, _srt_ts_to_sec(c["start"]) + 0.3, img):
+            if cut_frame(video, _srt_ts_to_sec(c["start"]) + shot_offset, img):
                 img_tag = f'<img src="{img.name}"><br>'
                 media.append(img)
             else:
@@ -962,6 +962,9 @@ def main() -> None:
     ap.add_argument("--screenshots", action="store_true",
                     help="add a video frame (at each sentence start) to the card "
                          "front (larger .apkg)")
+    ap.add_argument("--shot-offset", type=float, default=0.3,
+                    help="seconds after the sentence start to grab the screenshot "
+                         "(default: 0.3; 0 = exact start, risks scene-cut frames)")
     ap.add_argument("--title", default=None,
                     help="deck title (default: the YouTube video title)")
     args = ap.parse_args()
@@ -1009,7 +1012,7 @@ def main() -> None:
     upstream_ran = ran_dl or ran_tx or ran_sp or ran_tr
     apkg, _clip_dir = stage_build_deck(mp3, video, srt_path, tsv_path, wd, vid,
                                        deck_name, args.clip_pad, args.screenshots,
-                                       upstream_ran, args.yes)
+                                       args.shot_offset, upstream_ran, args.yes)
 
     print()
     good(f"DONE. Anki deck: {apkg}")
