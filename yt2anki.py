@@ -771,14 +771,20 @@ def cut_clip(mp3: Path, start: float, end: float, pad: float, out: Path) -> None
     )
 
 
-def cut_frame(video: Path, t: float, out: Path, width: int = 480) -> None:
-    """Grab one JPEG frame from `video` at time t (s), downscaled to `width`."""
+def cut_frame(video: Path, t: float, out: Path, width: int = 480) -> bool:
+    """Grab one JPEG frame from `video` at time t (s), downscaled to `width`.
+
+    Returns True iff a non-empty frame was written. Seeking before the video
+    stream's first frame (e.g. a delayed video track) makes ffmpeg exit 0 while
+    writing nothing, so we verify rather than trust the exit code.
+    """
     subprocess.run(
         ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
          "-ss", f"{max(0.0, t):.3f}", "-i", str(video),
          "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "3", str(out)],
-        check=True,
+        check=False, stderr=subprocess.DEVNULL,
     )
+    return out.exists() and out.stat().st_size > 0
 
 
 # --- .apkg writer (genanki) ------------------------------------------------
@@ -897,13 +903,16 @@ def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
         cut_clip(mp3, _srt_ts_to_sec(c["start"]), _srt_ts_to_sec(c["end"]),
                  clip_pad, clip)
         media = [clip]
-        # a frame just after the sentence start dodges scene-cut/black frames
+        # a frame just after the sentence start dodges scene-cut/black frames;
+        # only reference it if ffmpeg actually produced a non-empty frame
         img_tag = ""
         if shots:
             img = clip_dir / f"{vid}_{i:05d}.jpg"
-            cut_frame(video, _srt_ts_to_sec(c["start"]) + 0.3, img)
-            img_tag = f'<img src="{img.name}"><br>'
-            media.append(img)
+            if cut_frame(video, _srt_ts_to_sec(c["start"]) + 0.3, img):
+                img_tag = f'<img src="{img.name}"><br>'
+                media.append(img)
+            else:
+                warn(f"no video frame at cue {i+1} ({c['start']}); card has no image")
         # front: colored+furigana > furigana > plain. ruby runs after colorize so
         # color spans wrap the ruby. back: colored translation when aligned.
         if asrc[i].strip():
