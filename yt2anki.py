@@ -601,12 +601,12 @@ def anthropic_extract_vocab(sentences: list[str], model: str,
     """Extract content-word vocabulary per sentence (anthropic).
 
     Returns a list aligned to `sentences`; each element is a list of
-    `{word, word_ruby, pos, reading, meaning, form}` dicts. `word` is the
+    `{word, word_ruby, pos, reading, meaning, kanji_info}` dicts. `word` is the
     dictionary/plain form; `word_ruby` is that form in furigana notation (JA only,
     rendered as ruby above the kanji); `pos` is the part of speech (with JA verb/
     adjective sub-class); `reading` is the pronunciation (kana for JA, empty for
-    phonetic Latin/Cyrillic scripts); `form` names the inflection when the word
-    appears conjugated.
+    phonetic Latin/Cyrillic scripts); `kanji_info` is a per-kanji meaning
+    breakdown (JA).
     """
     is_ja = source_lang.lower() == "ja"
     pos_spec = (
@@ -627,8 +627,12 @@ def anthropic_extract_vocab(sentences: list[str], model: str,
         "or Cyrillic alphabet (most European languages), fill it only for "
         "non-phonetic scripts;\n"
     )
-    form_example = ("'食べました — polite past' for 食べる" if is_ja
-                    else "'mangé — past participle' for manger")
+    kanji_spec = (
+        "kanji_info = for EACH kanji character in the word, that kanji followed by "
+        f"a one or two word {lang_name(user_lang)} keyword of its meaning, joined "
+        "with ' · ', e.g. '学 = study · 校 = school'; EMPTY string when the word "
+        "has no kanji;\n" if is_ja else ""
+    )
     instruction = (
         f"For each numbered {lang_name(source_lang)} sentence, extract the content "
         "words worth learning: nouns, verbs, adjectives, adverbs. SKIP particles, "
@@ -638,9 +642,7 @@ def anthropic_extract_vocab(sentences: list[str], model: str,
         + pos_spec
         + reading_spec +
         f"meaning = a short {lang_name(user_lang)} gloss for an A1 learner;\n"
-        "form = if the word appears conjugated/inflected in the sentence, the "
-        "surface form as it appears plus a short label, e.g. " + form_example +
-        "; EMPTY string when it already appears in dictionary form.\n"
+        + kanji_spec +
         "Return ONLY a JSON array with one element per sentence in order; each "
         'element is itself a JSON array of these word objects (an empty array [] '
         "if the sentence has no useful content words), with no commentary."
@@ -670,7 +672,7 @@ def anthropic_extract_vocab(sentences: list[str], model: str,
                     "pos": str(w.get("pos", "")).strip(),
                     "reading": str(w.get("reading", "")).strip(),
                     "meaning": str(w.get("meaning", "")).strip(),
-                    "form": str(w.get("form", "")).strip(),
+                    "kanji_info": str(w.get("kanji_info", "")).strip(),
                 })
             out.append(words)
         info(f"extracted vocab {min(i+BATCH, len(sentences))}/{len(sentences)}")
@@ -848,9 +850,9 @@ def stage_extract_vocab(srt_path: Path, wd: Path, vid: str, model: str,
                         auto_yes: bool) -> tuple[Path, bool]:
     """Extract unique content-word vocab -> <vid>.vocab.tsv (anthropic only).
 
-    TSV cols: word \t word_ruby \t pos \t reading \t meaning \t form \t
+    TSV cols: word \t word_ruby \t pos \t reading \t meaning \t kanji_info \t
     sentence_index. Dedup is by lemma, keeping the first occurrence; sentence_index
-    points at the cue whose clip/text/translation the vocab card reuses.
+    points at the cue whose clip/text/translation the card reuses.
     """
     vocab_tsv = wd / f"{vid}.vocab.tsv"
     if reuse(vocab_tsv, auto_yes):
@@ -872,7 +874,7 @@ def stage_extract_vocab(srt_path: Path, wd: Path, vid: str, model: str,
                 continue
             seen.add(w["word"])
             rows.append((w["word"], w["word_ruby"], w["pos"], w["reading"],
-                         w["meaning"], w["form"], str(idx)))
+                         w["meaning"], w["kanji_info"], str(idx)))
     info(f"{len(rows)} unique vocab words")
     if not rows:
         warn("no vocab words extracted; vocab deck will be empty")
@@ -992,11 +994,11 @@ def write_vocab_apkg(out_path: Path, deck_name: str,
                      ) -> None:
     """Write the vocabulary .apkg (note type `yt2anki Vocab`).
 
-    cards: (word, pos, reading, meaning, form, sentence, sentence_meaning, audio,
-    [media]). The front shows the word (furigana ruby above the kanji for JA);
-    the back leads with the part of speech, then reading, meaning, the inflection
-    note, the example sentence + its translation, and the sentence audio (kept on
-    the back since it's the whole sentence, not the word alone).
+    cards: (word, pos, reading, meaning, kanji_info, sentence, sentence_meaning,
+    audio, [media]). The front shows the word (furigana ruby above the kanji for
+    JA); the back leads with the part of speech, then reading, meaning, a per-kanji
+    meaning breakdown, the example sentence + its translation, and the sentence
+    audio (kept on the back since it's the whole sentence, not the word alone).
     """
     try:
         import genanki
@@ -1007,7 +1009,7 @@ def write_vocab_apkg(out_path: Path, deck_name: str,
     model = genanki.Model(
         VOCAB_MODEL_ID, "yt2anki Vocab",
         fields=[{"name": "Word"}, {"name": "Pos"}, {"name": "Reading"},
-                {"name": "Meaning"}, {"name": "Form"}, {"name": "Sentence"},
+                {"name": "Meaning"}, {"name": "KanjiInfo"}, {"name": "Sentence"},
                 {"name": "SentenceMeaning"}, {"name": "Audio"}],
         templates=[{
             "name": "Card 1",
@@ -1017,7 +1019,7 @@ def write_vocab_apkg(out_path: Path, deck_name: str,
                 "{{#Pos}}<div class=\"pos\">{{Pos}}</div>{{/Pos}}"
                 "{{#Reading}}<div class=\"reading\">{{Reading}}</div>{{/Reading}}"
                 "<div class=\"meaning\">{{Meaning}}</div>"
-                "{{#Form}}<div class=\"note\">{{Form}}</div>{{/Form}}"
+                "{{#KanjiInfo}}<div class=\"kanji\">{{KanjiInfo}}</div>{{/KanjiInfo}}"
                 "{{#Sentence}}<div class=\"ex\">{{Sentence}}</div>{{/Sentence}}"
                 "{{#SentenceMeaning}}<div class=\"note\">{{SentenceMeaning}}"
                 "</div>{{/SentenceMeaning}}"
@@ -1027,14 +1029,18 @@ def write_vocab_apkg(out_path: Path, deck_name: str,
         css=_APKG_CSS + ".pos{font-size:0.5em;color:#999;text-transform:uppercase;"
                         "letter-spacing:0.05em;margin-bottom:6px}"
                         ".reading{font-size:0.7em;color:#888}"
+                        ".kanji{font-size:0.6em;color:#777;margin-top:10px;"
+                        "line-height:1.5}"
                         ".ex{font-size:0.8em;margin-top:14px}",
     )
     deck = genanki.Deck(VOCAB_DECK_ID, deck_name)
     media: list[str] = []
-    for word, pos, reading, meaning, form, sent, sent_meaning, audio, paths in cards:
+    for (word, pos, reading, meaning, kanji_info, sent, sent_meaning,
+         audio, paths) in cards:
         deck.add_note(genanki.Note(
             model=model,
-            fields=[word, pos, reading, meaning, form, sent, sent_meaning, audio]))
+            fields=[word, pos, reading, meaning, kanji_info, sent,
+                    sent_meaning, audio]))
         media.extend(str(p) for p in paths)
 
     genanki.Package(deck, media_files=media).write_to_file(str(out_path))
@@ -1157,7 +1163,7 @@ def build_vocab_deck(srt_path: Path, tsv_path: Path, vocab_tsv: Path,
         parts = line.split("\t")
         if len(parts) < 7:
             continue
-        word, word_ruby, pos, reading, meaning, form, idx_s = parts[:7]
+        word, word_ruby, pos, reading, meaning, kanji_info, idx_s = parts[:7]
         try:
             i = int(idx_s)
         except ValueError:
@@ -1172,8 +1178,8 @@ def build_vocab_deck(srt_path: Path, tsv_path: Path, vocab_tsv: Path,
             media, audio = [clip], f"[sound:{clip.name}]"
         else:
             media, audio = [], ""
-        cards.append((word_html, pos, reading, meaning, form, sent, sent_meaning,
-                      audio, media))
+        cards.append((word_html, pos, reading, meaning, kanji_info, sent,
+                      sent_meaning, audio, media))
 
     write_vocab_apkg(vocab_apkg, deck_name, cards)
     info(f"vocab deck: {len(cards)} cards")

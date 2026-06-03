@@ -100,9 +100,10 @@ When it finishes you'll have, inside `work/<video-id>/`:
 - `<video-id>.apkg` — a ready-to-import Anki deck with the audio bundled in
 - `<video-id>.vocab.apkg` — _(with `--vocab`)_ a separate vocabulary deck of the
   unique content words. Each card shows the word (dictionary form) on the front;
-  the back adds its reading, meaning, the inflected form as it appeared in the
-  video, and the example sentence with its audio. Words are deduplicated by
-  dictionary form, keeping the first sentence each appeared in.
+  the back adds the part of speech (for Japanese, the verb class u-/ru- or
+  adjective class i-/na-), reading, meaning, a per-kanji meaning breakdown, and
+  the example sentence with its audio. Words are deduplicated by dictionary form,
+  keeping the first sentence each appeared in.
 
 ## Importing into Anki
 
