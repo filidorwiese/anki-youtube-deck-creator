@@ -7,6 +7,9 @@ Each card also gets a short grammar/usage note on the back (the key grammar poin
 plus the dictionary form of an inflected verb/adjective/adverb). Japanese sources
 additionally get furigana readings over the kanji, and with `--color-words` the
 matching words in the source and translation are shown in the same color.
+Optionally (`--vocab`) it also builds a separate vocabulary deck of the unique
+content words, each with its reading, meaning, and the example sentence it came
+from.
 
 It's a single Python script that chains together a few command-line tools:
 download the video, transcribe the speech, split it into sentences, translate
@@ -79,6 +82,8 @@ Handy options:
 | `--color-words` | off                 | color-code matching words across the source and translation (extra Claude pass) |
 | `--screenshots` | off                 | add a video frame (at each sentence start) to the card front (larger `.apkg`) |
 | `--shot-offset` | `0.3`               | seconds after the sentence start to grab the screenshot (`0` = exact start, risks scene-cut frames) |
+| `--vocab` | off                 | also build a vocabulary deck (`<video-id>.vocab.apkg`) of unique content words (anthropic backend only) |
+| `--vocab-only` | off                 | build only the vocabulary deck, skip the sentence deck (implies `--vocab`) |
 | `--model` | `small`             | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) — bigger is more accurate but slower |
 | `--translate-model` | `claude-sonnet-4-6` | which Claude model translates |
 | `--workdir` | `./work`            | where intermediate files are saved |
@@ -93,6 +98,11 @@ and start again. Choosing recreate at one step recreates every later step too;
 When it finishes you'll have, inside `work/<video-id>/`:
 
 - `<video-id>.apkg` — a ready-to-import Anki deck with the audio bundled in
+- `<video-id>.vocab.apkg` — _(with `--vocab`)_ a separate vocabulary deck of the
+  unique content words. Each card shows the word (dictionary form) on the front;
+  the back adds its reading, meaning, the inflected form as it appeared in the
+  video, and the example sentence with its audio. Words are deduplicated by
+  dictionary form, keeping the first sentence each appeared in.
 
 ## Importing into Anki
 
@@ -115,3 +125,11 @@ The pipeline runs in five steps:
    `--clip-pad`), optionally grab a video frame per sentence (`--screenshots`),
    and package the sentences, translations, clips, and frames into a single
    `.apkg` (genanki).
+
+With `--vocab`, step 4 makes one extra Claude pass that extracts the content
+words (nouns/verbs/adjectives/adverbs) per sentence, and step 5 deduplicates them
+by dictionary form and packages them into a separate `<video-id>.vocab.apkg`,
+reusing each word's first-occurrence sentence clip for the audio. `--vocab-only`
+skips building the sentence deck. The vocabulary deck is anthropic-only; reading
+is filled for non-phonetic scripts (kana for Japanese) and left empty for
+languages already written phonetically.

@@ -595,6 +595,71 @@ def anthropic_translate_annotate(sentences: list[str], model: str,
     return tgt, fura, notes
 
 
+def anthropic_extract_vocab(sentences: list[str], model: str,
+                            source_lang: str, user_lang: str
+                            ) -> list[list[dict]]:
+    """Extract content-word vocabulary per sentence (anthropic).
+
+    Returns a list aligned to `sentences`; each element is a list of
+    `{word, reading, meaning, form}` dicts. `word` is the dictionary/plain form;
+    `reading` is the pronunciation (kana for JA, empty for phonetic Latin/Cyrillic
+    scripts); `form` names the inflection when the word appears conjugated.
+    """
+    is_ja = source_lang.lower() == "ja"
+    reading_spec = (
+        "reading = kana (hiragana) reading of the word;\n" if is_ja else
+        "reading = the pronunciation/reading; leave it an EMPTY string when the "
+        f"{lang_name(source_lang)} word is already written phonetically in a Latin "
+        "or Cyrillic alphabet (most European languages), fill it only for "
+        "non-phonetic scripts;\n"
+    )
+    form_example = ("'食べました — polite past' for 食べる" if is_ja
+                    else "'mangé — past participle' for manger")
+    instruction = (
+        f"For each numbered {lang_name(source_lang)} sentence, extract the content "
+        "words worth learning: nouns, verbs, adjectives, adverbs. SKIP particles, "
+        "copulas, auxiliaries, pronouns, bare numbers and proper nouns. For each "
+        "word return an object with:\n"
+        "word = its dictionary/plain (lemma) form, NOT the conjugated surface form;\n"
+        + reading_spec +
+        f"meaning = a short {lang_name(user_lang)} gloss for an A1 learner;\n"
+        "form = if the word appears conjugated/inflected in the sentence, the "
+        "surface form as it appears plus a short label, e.g. " + form_example +
+        "; EMPTY string when it already appears in dictionary form.\n"
+        "Return ONLY a JSON array with one element per sentence in order; each "
+        'element is itself a JSON array of these word objects (an empty array [] '
+        "if the sentence has no useful content words), with no commentary."
+    )
+    out: list[list[dict]] = []
+    BATCH = 20
+    for i in range(0, len(sentences), BATCH):
+        chunk = sentences[i:i + BATCH]
+        numbered = "\n".join(f"{j+1}. {s}" for j, s in enumerate(chunk))
+        arr = _extract_json(_anthropic_call(instruction + "\n\n" + numbered, model, 8192))
+        if not isinstance(arr, list) or len(arr) != len(chunk):
+            warn(f"batch {i//BATCH}: expected {len(chunk)} sentence-lists, got "
+                 f"{len(arr) if isinstance(arr, list) else 'none'}; aligning")
+            arr = (list(arr) if isinstance(arr, list) else []) + [[]] * len(chunk)
+            arr = arr[:len(chunk)]
+        for el in arr:
+            words = []
+            for w in (el if isinstance(el, list) else []):
+                if not isinstance(w, dict):
+                    continue
+                word = str(w.get("word", "")).strip()
+                if not word:
+                    continue
+                words.append({
+                    "word": word,
+                    "reading": str(w.get("reading", "")).strip(),
+                    "meaning": str(w.get("meaning", "")).strip(),
+                    "form": str(w.get("form", "")).strip(),
+                })
+            out.append(words)
+        info(f"extracted vocab {min(i+BATCH, len(sentences))}/{len(sentences)}")
+    return out
+
+
 # a kanji run directly followed by [reading] -> <ruby> for Anki/HTML display.
 # Matching only kanji as the base avoids grabbing leading kana (お茶[ちゃ] -> 茶).
 _RUBY_RE = re.compile(r"([一-鿿々〆ヶ]+)\[([^\[\]]+)\]")
@@ -761,6 +826,47 @@ def stage_translate(srt_path: Path, wd: Path, vid: str, backend: str,
     return tsv_path, True
 
 
+def stage_extract_vocab(srt_path: Path, wd: Path, vid: str, model: str,
+                        source_lang: str, user_lang: str,
+                        auto_yes: bool) -> tuple[Path, bool]:
+    """Extract unique content-word vocab -> <vid>.vocab.tsv (anthropic only).
+
+    TSV cols: word \t reading \t meaning \t form \t sentence_index.
+    Dedup is by lemma, keeping the first occurrence; sentence_index points at the
+    cue whose clip/text/translation the vocab card reuses.
+    """
+    vocab_tsv = wd / f"{vid}.vocab.tsv"
+    if reuse(vocab_tsv, auto_yes):
+        produced(vocab_tsv)
+        return vocab_tsv, False
+    cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+    if not cues:
+        die("SRT empty/malformed; nothing to extract vocab from", f"inspect {srt_path}")
+    src = [c["text"] for c in cues]
+    info(f"extracting vocab from {len(src)} sentences "
+         f"({lang_name(source_lang)}, {model})")
+    per_sentence = anthropic_extract_vocab(src, model, source_lang, user_lang)
+
+    seen: set[str] = set()
+    rows: list[tuple[str, str, str, str, str]] = []
+    for idx, words in enumerate(per_sentence):
+        for w in words:
+            if w["word"] in seen:
+                continue
+            seen.add(w["word"])
+            rows.append((w["word"], w["reading"], w["meaning"], w["form"], str(idx)))
+    info(f"{len(rows)} unique vocab words")
+    if not rows:
+        warn("no vocab words extracted; vocab deck will be empty")
+
+    clean = lambda x: x.replace("\t", " ").replace("\n", " ")  # noqa: E731
+    with vocab_tsv.open("w", encoding="utf-8", newline="") as f:
+        for r in rows:
+            f.write("\t".join(clean(x) for x in r) + "\n")
+    produced(vocab_tsv)
+    return vocab_tsv, True
+
+
 # ===========================================================================
 # STAGE 5 — BUILD DECK  (ffmpeg per-cue clips + merge translations -> .apkg)
 # ===========================================================================
@@ -858,6 +964,59 @@ def write_apkg(out_path: Path, deck_name: str,
     genanki.Package(deck, media_files=media).write_to_file(str(out_path))
 
 
+# Vocab note type — its own stable ids so it imports as a distinct deck/model.
+VOCAB_MODEL_ID = 1726000000003
+VOCAB_DECK_ID = 1726000000004
+
+
+def write_vocab_apkg(out_path: Path, deck_name: str,
+                     cards: list[tuple[str, str, str, str, str, str, str, list[Path]]]
+                     ) -> None:
+    """Write the vocabulary .apkg (note type `yt2anki Vocab`).
+
+    cards: (word, reading, meaning, form, sentence, sentence_meaning, audio,
+    [media]). Front tests recall of the dictionary form; the back adds reading,
+    meaning, the inflection note, then the example sentence + its audio.
+    """
+    try:
+        import genanki
+    except ImportError:
+        die("genanki not installed (needed to build the .apkg)",
+            "python3 -m pip install genanki")
+
+    model = genanki.Model(
+        VOCAB_MODEL_ID, "yt2anki Vocab",
+        fields=[{"name": "Word"}, {"name": "Reading"}, {"name": "Meaning"},
+                {"name": "Form"}, {"name": "Sentence"},
+                {"name": "SentenceMeaning"}, {"name": "Audio"}],
+        templates=[{
+            "name": "Card 1",
+            "qfmt": "{{Word}}",
+            "afmt": (
+                "{{FrontSide}}\n\n<hr id=answer>\n\n"
+                "{{#Reading}}<div class=\"reading\">{{Reading}}</div>{{/Reading}}"
+                "<div class=\"meaning\">{{Meaning}}</div>"
+                "{{#Form}}<div class=\"note\">{{Form}}</div>{{/Form}}"
+                "{{#Sentence}}<div class=\"ex\">{{Sentence}}</div>{{/Sentence}}"
+                "{{#SentenceMeaning}}<div class=\"note\">{{SentenceMeaning}}"
+                "</div>{{/SentenceMeaning}}"
+                "{{Audio}}"
+            ),
+        }],
+        css=_APKG_CSS + ".reading{font-size:0.7em;color:#888}"
+                        ".ex{font-size:0.8em;margin-top:14px}",
+    )
+    deck = genanki.Deck(VOCAB_DECK_ID, deck_name)
+    media: list[str] = []
+    for word, reading, meaning, form, sent, sent_meaning, audio, paths in cards:
+        deck.add_note(genanki.Note(
+            model=model,
+            fields=[word, reading, meaning, form, sent, sent_meaning, audio]))
+        media.extend(str(p) for p in paths)
+
+    genanki.Package(deck, media_files=media).write_to_file(str(out_path))
+
+
 def _print_import_instructions(apkg: Path) -> None:
     print()
     print(_c("1;32", "  HOW TO IMPORT INTO ANKI"))
@@ -867,18 +1026,20 @@ def _print_import_instructions(apkg: Path) -> None:
 
 def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
                      wd: Path, vid: str, deck_name: str, clip_pad: float,
-                     screenshots: bool, shot_offset: float, upstream_ran: bool,
+                     screenshots: bool, shot_offset: float, build_sentence: bool,
+                     build_vocab: bool, upstream_ran: bool,
                      auto_yes: bool) -> tuple[Path, Path]:
     clip_dir = wd / f"{vid}_clips"
     apkg = wd / f"{vid}.apkg"
 
-    # reuse an existing apkg only if no upstream stage actually ran this run;
-    # otherwise rebuild it so it reflects the fresh upstream output.
-    if not upstream_ran and reuse(apkg, auto_yes):
+    # fast path: reuse the sentence .apkg only when it's the sole output and no
+    # upstream stage ran. When vocab is also requested we must fall through to
+    # (re)cut the clips the vocab deck reuses.
+    if build_sentence and not build_vocab and not upstream_ran and reuse(apkg, auto_yes):
         produced(apkg)
         _print_import_instructions(apkg)
         return apkg, clip_dir
-    if apkg.exists() and upstream_ran:
+    if build_sentence and apkg.exists() and upstream_ran:
         info("upstream stage ran; rebuilding .apkg")
 
     if clip_dir.exists():
@@ -942,10 +1103,57 @@ def stage_build_deck(mp3: Path, video: Path, srt_path: Path, tsv_path: Path,
             back += f'<div class="note">{note[i]}</div>'
         cards.append((front, back, media))
 
-    write_apkg(apkg, deck_name, cards)
-    produced(apkg)
-    _print_import_instructions(apkg)
+    if build_sentence:
+        write_apkg(apkg, deck_name, cards)
+        produced(apkg)
+        _print_import_instructions(apkg)
     return apkg, clip_dir
+
+
+def build_vocab_deck(srt_path: Path, tsv_path: Path, vocab_tsv: Path,
+                     clip_dir: Path, wd: Path, vid: str, deck_name: str,
+                     rebuild: bool, auto_yes: bool) -> Path:
+    """Build the vocab .apkg from <vid>.vocab.tsv, reusing each word's first-
+    occurrence sentence clip / furigana text / translation."""
+    vocab_apkg = wd / f"{vid}.vocab.apkg"
+    if not rebuild and reuse(vocab_apkg, auto_yes):
+        produced(vocab_apkg)
+        _print_import_instructions(vocab_apkg)
+        return vocab_apkg
+
+    cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+    # reuse the translation/furigana columns produced in stage 4
+    en, fura = [], []
+    for line in tsv_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        en.append(parts[1] if len(parts) > 1 else "")
+        fura.append(parts[2] if len(parts) > 2 else "")
+
+    cards: list[tuple[str, str, str, str, str, str, str, list[Path]]] = []
+    for line in vocab_tsv.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        word, reading, meaning, form, idx_s = parts[:5]
+        try:
+            i = int(idx_s)
+        except ValueError:
+            continue
+        sent = (ruby_to_html(fura[i]) if i < len(fura) and fura[i].strip()
+                else cues[i]["text"] if i < len(cues) else "")
+        sent_meaning = en[i] if i < len(en) else ""
+        clip = clip_dir / f"{vid}_{i:05d}.mp3"
+        if clip.exists():
+            media, audio = [clip], f"[sound:{clip.name}]"
+        else:
+            media, audio = [], ""
+        cards.append((word, reading, meaning, form, sent, sent_meaning, audio, media))
+
+    write_vocab_apkg(vocab_apkg, deck_name, cards)
+    info(f"vocab deck: {len(cards)} cards")
+    produced(vocab_apkg)
+    _print_import_instructions(vocab_apkg)
+    return vocab_apkg
 
 
 # ===========================================================================
@@ -982,10 +1190,24 @@ def main() -> None:
                          "(default: 0.3; 0 = exact start, risks scene-cut frames)")
     ap.add_argument("--title", default=None,
                     help="deck title (default: the YouTube video title)")
+    ap.add_argument("--vocab", action="store_true",
+                    help="also build a vocabulary deck (<vid>.vocab.apkg) of unique "
+                         "content words (anthropic backend only)")
+    ap.add_argument("--vocab-only", action="store_true",
+                    help="build only the vocabulary deck, skip the sentence deck "
+                         "(implies --vocab)")
     args = ap.parse_args()
     if not args.source_lang:
         ap.error("--source-lang is required: set the spoken language of the "
                  "video, e.g. --source-lang ja  (--user-lang defaults to en)")
+
+    build_vocab = args.vocab or args.vocab_only
+    build_sentence = not args.vocab_only
+    if build_vocab and args.translate_backend != "anthropic":
+        warn(f"--vocab needs the anthropic backend (got '{args.translate_backend}'); "
+             "skipping the vocab deck")
+        build_vocab = False
+        build_sentence = True  # don't leave the user with no deck
 
     # load .env (script dir first, then cwd); real env vars still take precedence
     load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -1023,14 +1245,33 @@ def main() -> None:
                                        args.user_lang, args.color_words,
                                        args.yes)
 
+    ran_ve = False
+    vocab_tsv = None
+    if build_vocab:
+        info("extracting vocabulary (part of stage 4)")
+        vocab_tsv, ran_ve = stage_extract_vocab(srt_path, wd, vid,
+                                                args.translate_model,
+                                                args.source_lang, args.user_lang,
+                                                args.yes)
+
     header(5, STAGES_TOTAL, "BUILD DECK (ffmpeg clips + translations -> .apkg)")
     upstream_ran = ran_dl or ran_tx or ran_sp or ran_tr
-    apkg, _clip_dir = stage_build_deck(mp3, video, srt_path, tsv_path, wd, vid,
-                                       deck_name, args.clip_pad, args.screenshots,
-                                       args.shot_offset, upstream_ran, args.yes)
+    apkg, clip_dir = stage_build_deck(mp3, video, srt_path, tsv_path, wd, vid,
+                                      deck_name, args.clip_pad, args.screenshots,
+                                      args.shot_offset, build_sentence, build_vocab,
+                                      upstream_ran, args.yes)
+
+    vocab_apkg = None
+    if build_vocab and vocab_tsv is not None:
+        vocab_apkg = build_vocab_deck(srt_path, tsv_path, vocab_tsv, clip_dir, wd,
+                                      vid, f"{deck_name}::vocab",
+                                      upstream_ran or ran_ve, args.yes)
 
     print()
-    good(f"DONE. Anki deck: {apkg}")
+    if build_sentence:
+        good(f"DONE. Anki deck: {apkg}")
+    if vocab_apkg is not None:
+        good(f"DONE. Vocab deck: {vocab_apkg}")
 
 
 if __name__ == "__main__":
