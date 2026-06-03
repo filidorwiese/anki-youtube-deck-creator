@@ -983,9 +983,10 @@ def write_vocab_apkg(out_path: Path, deck_name: str,
     """Write the vocabulary .apkg (note type `yt2anki Vocab`).
 
     cards: (word, reading, meaning, form, sentence, sentence_meaning, audio,
-    [media]). The front shows the word (furigana ruby above the kanji for JA)
-    and plays the example-sentence audio; the back adds reading, meaning, the
-    inflection note, and the example sentence + its translation.
+    [media]). The front shows the word (furigana ruby above the kanji for JA);
+    the back adds reading, meaning, the inflection note, the example sentence +
+    its translation, and the sentence audio (kept on the back since it's the
+    whole sentence, not the word alone).
     """
     try:
         import genanki
@@ -1000,7 +1001,7 @@ def write_vocab_apkg(out_path: Path, deck_name: str,
                 {"name": "SentenceMeaning"}, {"name": "Audio"}],
         templates=[{
             "name": "Card 1",
-            "qfmt": "{{Word}}<br>{{Audio}}",
+            "qfmt": "{{Word}}",
             "afmt": (
                 "{{FrontSide}}\n\n<hr id=answer>\n\n"
                 "{{#Reading}}<div class=\"reading\">{{Reading}}</div>{{/Reading}}"
@@ -1009,6 +1010,7 @@ def write_vocab_apkg(out_path: Path, deck_name: str,
                 "{{#Sentence}}<div class=\"ex\">{{Sentence}}</div>{{/Sentence}}"
                 "{{#SentenceMeaning}}<div class=\"note\">{{SentenceMeaning}}"
                 "</div>{{/SentenceMeaning}}"
+                "{{Audio}}"
             ),
         }],
         css=_APKG_CSS + ".reading{font-size:0.7em;color:#888}"
