@@ -1289,7 +1289,8 @@ def main() -> None:
     header(5, STAGES_TOTAL, "BUILD DECK (ffmpeg clips + translations -> .apkg)")
     upstream_ran = ran_dl or ran_tx or ran_sp or ran_tr
     apkg, clip_dir = stage_build_deck(mp3, video, srt_path, tsv_path, wd, vid,
-                                      deck_name, args.clip_pad, args.screenshots,
+                                      f"{deck_name}::sentences", args.clip_pad,
+                                      args.screenshots,
                                       args.shot_offset, build_sentence, build_vocab,
                                       upstream_ran, args.yes)
 

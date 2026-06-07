@@ -98,6 +98,7 @@ and start again. Choosing recreate at one step recreates every later step too;
 When it finishes you'll have, inside `work/<video-id>/`:
 
 - `<video-id>.apkg` — a ready-to-import Anki deck with the audio bundled in
+  (imports as `youtube::<title>::sentences`)
 - `<video-id>.vocab.apkg` — _(with `--vocab`)_ a separate vocabulary deck of the
   unique content words. Each card shows the word (dictionary form) on the front;
   the back adds the part of speech (for Japanese, the verb class u-/ru- or

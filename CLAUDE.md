@@ -63,7 +63,8 @@ needs it at runtime).
    padded by `--clip-pad`; source text comes from the SRT, translations from the
    TSV, packaged via `write_apkg` (genanki) into a self-contained `<vid>.apkg`
    (front=source + `[sound:clip]` so audio is on the source side, back=user,
-   audio bundled). Deck is named `youtube::<title>`; the title comes from
+   audio bundled). Deck is named `youtube::<title>::sentences` (sibling of the
+   `::vocab` deck under the `youtube::<title>` namespace); the title comes from
    `--title`, else `video_title()` (yt-dlp, cached to `<vid>.title`), and unless
    `--yes`/`--title` the user can edit it via an inline `prompt_edit()` prompt.
 
